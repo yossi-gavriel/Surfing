@@ -13,4 +13,4 @@ COPY services/frame-processor/ /app/services/frame-processor/
 
 ENV PYTHONPATH=/app
 
-CMD ["python", "src/main.py"]
+CMD ["python", "services/frame-processor/src/main.py"]
