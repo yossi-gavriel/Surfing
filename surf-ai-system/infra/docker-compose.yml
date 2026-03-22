@@ -21,7 +21,7 @@ services:
   frame-processor:
     build:
       context: ..
-      dockerfile: services/frame-processor/Dockerfile
+      dockerfile: services/frame_processor/Dockerfile
     container_name: frame-processor
     env_file:
       - ../.env

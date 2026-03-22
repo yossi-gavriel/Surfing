@@ -2,18 +2,15 @@ import os
 import json
 import time
 import boto3
-import sys
 import cv2
 import redis
 from datetime import datetime
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
-
-from src.config import config
-from src.detector import PersonDetector
-from src.tracker import IoUTracker
-from src.frame_loader import extract_frames
-from src.zones import ZoneCalculator
+from services.frame_processor.src.config import config
+from services.frame_processor.src.detector import PersonDetector
+from services.frame_processor.src.tracker import IoUTracker
+from services.frame_processor.src.frame_loader import extract_frames
+from services.frame_processor.src.zones import ZoneCalculator
 from shared.utils.logger import get_logger
 
 logger = get_logger("frame-processor")
