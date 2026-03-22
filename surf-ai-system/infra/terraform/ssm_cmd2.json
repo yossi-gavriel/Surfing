@@ -1,0 +1,1 @@
+{"commands":["bash -c 'set -e; echo \"=== STEP 3: RUN SYSTEM ===\"; cd /home/ubuntu/surf-ai-system; if [ -f docker-compose.yml ]; then docker-compose up -d --build; elif [ -f infra/docker-compose.yml ]; then cd infra && docker-compose up -d --build; else echo \"docker-compose.yml not found\"; exit 1; fi; echo \"=== STEP 4: VERIFY CONTAINERS ===\"; docker ps -a'"]}

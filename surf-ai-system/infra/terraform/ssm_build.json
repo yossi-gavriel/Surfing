@@ -1,0 +1,1 @@
+{"commands":["bash -c 'cd /home/ubuntu/surf-ai-system/infra && docker-compose build frame-processor 2>&1'"]}
