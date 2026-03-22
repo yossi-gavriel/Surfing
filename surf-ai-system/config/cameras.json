@@ -1,0 +1,10 @@
+{
+  "cameras": [
+    {
+      "camera_id": "cam1",
+      "rtsp_url": "rtsp://localhost:8554/cam1",
+      "position": "start",
+      "link_to": "cam2"
+    }
+  ]
+}

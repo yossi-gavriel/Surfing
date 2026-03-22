@@ -1,0 +1,63 @@
+<div class="results-container rtl-container">
+  
+  <div class="results-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+    <h2 style="margin:0; color:#1e293b; font-weight:700;">הביצועים שלך</h2>
+    <div>
+      <button (click)="tryAnotherImage()" class="btn-share btn-secondary" *ngIf="status() === 'ready' || status() === 'timeout'">נסה תמונה אחרת</button>
+      <button (click)="refresh()" class="btn-share" style="background:#64748b;" *ngIf="status() === 'ready' || status() === 'timeout'">רענן קליפים</button>
+    </div>
+  </div>
+
+  <div *ngIf="status() === 'processing'" class="message-box">
+    <div class="spinner"></div>
+    <p style="font-weight: 600; color: #3b82f6;">{{ loadingMessage() }}</p>
+  </div>
+
+  <div *ngIf="status() === 'error'" class="message-box">
+    <h3>אופס! שגיאה 🚨</h3>
+    <p>{{ errorMessage() || 'התרחשה שגיאה במערכת.' }}</p>
+    <button (click)="refresh()" class="btn-retry">נסה שוב לחפש</button>
+    <button (click)="tryAnotherImage()" class="btn-retry btn-secondary">נסה תמונה אחרת</button>
+  </div>
+
+  <div *ngIf="status() === 'timeout'" class="message-box">
+    <h3>לא נמצאו עדיין סרטונים שלך 🙃</h3>
+    <p>המערכת בודקת את הסשנים הקרובים, נסה שוב בעוד כמה דקות.</p>
+    <button (click)="refresh()" class="btn-retry">חפש שוב עכשיו</button>
+    <button (click)="tryAnotherImage()" class="btn-retry btn-secondary">נסה תמונה אחרת</button>
+  </div>
+
+  <div *ngIf="status() === 'ready' && rides().length > 0">
+    <!-- Featured Video -->
+    <div class="featured-video">
+      <video #featuredVideo muted loop playsinline [poster]="rides()[0].thumbnail_url || ''" (mouseenter)="featuredVideo.play()" (mouseleave)="featuredVideo.pause()">
+        <source [src]="rides()[0].preview_url" type="video/mp4" />
+      </video>
+      <div class="featured-card-body" style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="font-size: 1.2rem; font-weight: bold; color: #1e293b;">הגלישה הטובה ביותר! 🔥</span>
+          <br>
+          <span [ngClass]="'conf-' + rides()[0].confidence" style="font-size: 1rem; margin-top:0.3rem; display:inline-block;">
+            רמת ודאות: {{ (rides()[0].score * 100).toFixed(0) }}%
+          </span>
+        </div>
+        <button (click)="shareRide(rides()[0])" class="btn-share">שתף 🔗</button>
+      </div>
+    </div>
+
+    <!-- Grid Videos -->
+    <div class="grid" *ngIf="rides().length > 1">
+      <div class="video-card" *ngFor="let ride of rides() | slice:1">
+        <video #gridVideo muted loop playsinline [poster]="ride.thumbnail_url || ''" (mouseenter)="gridVideo.play()" (mouseleave)="gridVideo.pause()">
+          <source [src]="ride.preview_url" type="video/mp4" />
+        </video>
+        <div class="card-body" style="display: flex; justify-content: space-between; align-items: center;">
+          <span [ngClass]="'conf-' + ride.confidence" style="font-size: 0.95rem;">
+            זיהוי: {{ (ride.score * 100).toFixed(0) }}%
+          </span>
+          <button (click)="shareRide(ride)" class="btn-share" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;">שתף</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

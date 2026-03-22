@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    libsm6 libxext6 libgl1-mesa-glx \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY shared/ /app/shared/
+COPY services/embedding-service/requirements.txt /app/services/embedding-service/
+RUN pip install --no-cache-dir -r /app/services/embedding-service/requirements.txt
+
+COPY services/embedding-service/ /app/services/embedding-service/
+
+ENV PYTHONPATH=/app
+
+CMD ["python", "src/main.py"]

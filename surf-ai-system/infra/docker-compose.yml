@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+
+  ingestion-service:
+    build:
+      context: ..
+      dockerfile: services/ingestion-service/Dockerfile
+    container_name: ingestion-service
+    env_file:
+      - ../.env
+    volumes:
+      - ../config:/app/config
+      - ingestion-tmp:/tmp
+    restart: always
+
+  frame-processor:
+    build:
+      context: ..
+      dockerfile: services/frame-processor/Dockerfile
+    container_name: frame-processor
+    env_file:
+      - ../.env
+    restart: always
+
+  embedding-service:
+    build:
+      context: ..
+      dockerfile: services/embedding-service/Dockerfile
+    container_name: embedding-service
+    env_file:
+      - ../.env
+    restart: always
+
+  matching-service:
+    build:
+      context: ..
+      dockerfile: services/matching-service/Dockerfile
+    container_name: matching-service
+    env_file:
+      - ../.env
+    restart: always
+    volumes:
+      - db-data:/app/data
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: api-gateway
+    env_file:
+      - ../.env
+    ports:
+      - "8000:8000"
+    restart: always
+    volumes:
+      - db-data:/app/data
+
+  clipper-service:
+    build:
+      context: ..
+      dockerfile: services/clipper-service/Dockerfile
+    container_name: clipper-service
+    env_file:
+      - ../.env
+    restart: always
+
+volumes:
+  ingestion-tmp:
+  db-data:
