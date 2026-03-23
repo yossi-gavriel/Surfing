@@ -12,4 +12,4 @@ COPY services/clipper-service/ /app/services/clipper-service/
 
 ENV PYTHONPATH=/app
 
-CMD ["python", "src/main.py"]
+CMD ["python", "-m", "src.main"]

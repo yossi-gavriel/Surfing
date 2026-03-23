@@ -14,4 +14,4 @@ COPY services/embedding-service/ /app/services/embedding-service/
 
 ENV PYTHONPATH=/app
 
-CMD ["python", "src/main.py"]
+CMD ["python", "-m", "src.main"]
