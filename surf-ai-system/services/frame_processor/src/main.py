@@ -61,6 +61,7 @@ def source_context(msg_body: dict[str, Any]) -> dict[str, Any]:
     inferred_video_id = os.path.splitext(filename)[0]
     video_id = msg_body.get("video_id") or inferred_video_id
     camera_id = msg_body.get("camera_id")
+    pool_id = msg_body.get("pool_id")
     source_id = camera_id or video_id
     storage_key = camera_id or f"video-{video_id}"
     chunk_start_iso = msg_body.get("chunk_start") or msg_body.get("timestamp") or datetime.utcnow().isoformat()
@@ -70,6 +71,7 @@ def source_context(msg_body: dict[str, Any]) -> dict[str, Any]:
         "source_id": source_id,
         "storage_key": storage_key,
         "camera_id": camera_id,
+        "pool_id": pool_id,
         "video_id": video_id,
         "s3_path": s3_path,
         "filename": filename,
@@ -174,6 +176,7 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
                     "camera_id": source["camera_id"],
                     "track_id": str(tid),
                     "video_id": source["video_id"],
+                    "pool_id": source["pool_id"],
                     "source_video_id": source["video_id"],
                     "source_video_s3": source["s3_path"],
                     "bboxes": [],

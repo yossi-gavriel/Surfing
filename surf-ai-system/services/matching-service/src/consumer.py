@@ -148,6 +148,7 @@ class MatchingConsumer:
         return self.matches_db.add_match(
             {
                 "user_id": match_result.user_id,
+                "pool_id": match_result.pool_id,
                 "track_id": match_result.track_id,
                 "camera_id": match_result.camera_id,
                 "video_id": match_result.video_id,
@@ -175,6 +176,7 @@ class MatchingConsumer:
     ) -> None:
         outbound = {
             "user_id": match_result.user_id,
+            "pool_id": match_result.pool_id,
             "track_id": match_result.track_id,
             "camera_id": match_result.camera_id,
             "video_id": match_result.video_id,

@@ -31,21 +31,34 @@ class UsersDB:
                     email TEXT NOT NULL UNIQUE,
                     password_hash TEXT,
                     password_salt TEXT,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    pool_id TEXT,
                     created_at TEXT NOT NULL
                 )
                 """
             )
+            rows = conn.execute("PRAGMA table_info(users)").fetchall()
+            existing_columns = {row["name"] for row in rows}
+            if "role" not in existing_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+            if "pool_id" not in existing_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN pool_id TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_embeddings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
                     embedding_json TEXT NOT NULL,
+                    source_image_s3 TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
                 )
                 """
             )
+            rows = conn.execute("PRAGMA table_info(user_embeddings)").fetchall()
+            existing_columns = {row["name"] for row in rows}
+            if "source_image_s3" not in existing_columns:
+                conn.execute("ALTER TABLE user_embeddings ADD COLUMN source_image_s3 TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_user_embeddings_user_id
@@ -73,14 +86,16 @@ class UsersDB:
                     conn.execute(
                         """
                         INSERT OR IGNORE INTO users (
-                            user_id, email, password_hash, password_salt, created_at
-                        ) VALUES (?, ?, ?, ?, ?)
+                            user_id, email, password_hash, password_salt, role, pool_id, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             user_id,
                             raw_user.get("email") or f"{user_id}@legacy.local",
                             raw_user.get("password_hash"),
                             raw_user.get("password_salt"),
+                            raw_user.get("role") or "user",
+                            raw_user.get("pool_id"),
                             created_at,
                         ),
                     )
@@ -92,10 +107,10 @@ class UsersDB:
                     for embedding in embeddings or []:
                         conn.execute(
                             """
-                            INSERT INTO user_embeddings (user_id, embedding_json, created_at)
-                            VALUES (?, ?, ?)
+                            INSERT INTO user_embeddings (user_id, embedding_json, source_image_s3, created_at)
+                            VALUES (?, ?, ?, ?)
                             """,
-                            (user_id, json.dumps(embedding), created_at),
+                            (user_id, json.dumps(embedding), None, created_at),
                         )
                 conn.commit()
             except Exception:
@@ -108,6 +123,9 @@ class UsersDB:
                 """
                 SELECT
                     u.user_id,
+                    u.email,
+                    u.role,
+                    u.pool_id,
                     ue.id AS embedding_id,
                     ue.embedding_json
                 FROM users u
@@ -116,12 +134,21 @@ class UsersDB:
                 """
             ).fetchall()
 
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
             user_id = row["user_id"]
-            grouped.setdefault(user_id, [])
+            grouped.setdefault(
+                user_id,
+                {
+                    "user_id": user_id,
+                    "email": row["email"],
+                    "role": row["role"],
+                    "pool_id": row["pool_id"],
+                    "records": [],
+                },
+            )
             if row["embedding_json"] is not None:
-                grouped[user_id].append(
+                grouped[user_id]["records"].append(
                     {
                         "embedding_id": str(row["embedding_id"]),
                         "embedding": json.loads(row["embedding_json"]),
@@ -129,7 +156,8 @@ class UsersDB:
                 )
 
         loaded_users: list[dict[str, Any]] = []
-        for user_id, raw_records in grouped.items():
+        for user_id, grouped_user in grouped.items():
+            raw_records = grouped_user["records"]
             if not raw_records:
                 continue
 
@@ -153,6 +181,9 @@ class UsersDB:
             loaded_users.append(
                 {
                     "user_id": user_id,
+                    "email": grouped_user["email"],
+                    "role": grouped_user["role"],
+                    "pool_id": grouped_user["pool_id"],
                     "embeddings": embeddings,
                     "embedding_ids": embedding_ids,
                     "avg_embedding": avg_embedding[0],
@@ -160,7 +191,7 @@ class UsersDB:
             )
         return loaded_users
 
-    def get_all_users(self) -> list[dict[str, Any]]:
+    def get_all_users(self, pool_id: str | None = None) -> list[dict[str, Any]]:
         if not os.path.exists(self.db_path):
             logger.warning("Users database missing at %s", self.db_path)
             self._cached_users = []
@@ -177,11 +208,20 @@ class UsersDB:
             wal_stat.st_size if wal_stat else 0,
         )
         if self._cache_key == cache_key:
-            return self._cached_users
+            return self._filter_users_by_pool(self._cached_users, pool_id)
 
         self._cached_users = self._load_users()
         self._cache_key = cache_key
-        return self._cached_users
+        return self._filter_users_by_pool(self._cached_users, pool_id)
+
+    def _filter_users_by_pool(
+        self,
+        users: list[dict[str, Any]],
+        pool_id: str | None,
+    ) -> list[dict[str, Any]]:
+        if pool_id is None:
+            return users
+        return [user for user in users if user.get("pool_id") == pool_id]
 
 
 class MatchesDB:
@@ -215,11 +255,16 @@ class MatchesDB:
                     distance_max REAL NOT NULL,
                     second_best_score REAL,
                     score_margin REAL,
+                    pool_id TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(user_id, track_id)
                 )
                 """
             )
+            rows = conn.execute("PRAGMA table_info(matches)").fetchall()
+            existing_columns = {row["name"] for row in rows}
+            if "pool_id" not in existing_columns:
+                conn.execute("ALTER TABLE matches ADD COLUMN pool_id TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_matches_user_created
@@ -245,8 +290,8 @@ class MatchesDB:
                             user_id, track_id, camera_id, video_id, source_video_s3,
                             timestamp, keyframe, keyframe_s3, score, confidence, distance,
                             embeddings_used, distance_mean, distance_std, distance_max,
-                            second_best_score, score_margin, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            second_best_score, score_margin, pool_id, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             match.get("user_id"),
@@ -266,6 +311,7 @@ class MatchesDB:
                             float(match.get("distance_max", 0.0)),
                             match.get("second_best_score"),
                             match.get("score_margin"),
+                            match.get("pool_id"),
                             match.get("created_at") or datetime.now(timezone.utc).isoformat(),
                         ),
                     )
@@ -296,8 +342,8 @@ class MatchesDB:
                         user_id, track_id, camera_id, video_id, source_video_s3,
                         timestamp, keyframe, keyframe_s3, score, confidence, distance,
                         embeddings_used, distance_mean, distance_std, distance_max,
-                        second_best_score, score_margin, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        second_best_score, score_margin, pool_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         match["user_id"],
@@ -317,6 +363,7 @@ class MatchesDB:
                         float(match["distance_max"]),
                         match.get("second_best_score"),
                         match.get("score_margin"),
+                        match.get("pool_id"),
                         match.get("created_at") or datetime.now(timezone.utc).isoformat(),
                     ),
                 )

@@ -26,15 +26,37 @@ class SQLiteDB:
         with self.store.connection() as conn:
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS pools (
+                    pool_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(created_by) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pools_created_by
+                ON pools(created_by, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
                     email TEXT NOT NULL UNIQUE,
                     password_hash TEXT,
                     password_salt TEXT,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    pool_id TEXT,
                     created_at TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_column(conn, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
+            self._ensure_column(conn, "users", "pool_id", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_embeddings (
@@ -86,6 +108,8 @@ class SQLiteDB:
                 ON matches(user_id, created_at DESC)
                 """
             )
+            self._ensure_column(conn, "matches", "pool_id", "TEXT")
+        self._backfill_user_roles()
 
     def _migrate_legacy_json(self) -> None:
         if not self.store.table_has_rows("users"):
@@ -100,14 +124,19 @@ class SQLiteDB:
                             conn.execute(
                                 """
                                 INSERT OR IGNORE INTO users (
-                                    user_id, email, password_hash, password_salt, created_at
-                                ) VALUES (?, ?, ?, ?, ?)
+                                    user_id, email, password_hash, password_salt, role, pool_id, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 (
                                     user_id,
                                     raw_user.get("email") or f"{user_id}@legacy.local",
                                     raw_user.get("password_hash"),
                                     raw_user.get("password_salt"),
+                                    self._derive_role(
+                                        raw_user.get("email") or f"{user_id}@legacy.local",
+                                        prefer_first_admin=False,
+                                    ),
+                                    raw_user.get("pool_id"),
                                     created_at,
                                 ),
                             )
@@ -141,8 +170,8 @@ class SQLiteDB:
                                     user_id, track_id, camera_id, video_id, source_video_s3,
                                     timestamp, keyframe, keyframe_s3, score, confidence, distance,
                                     embeddings_used, distance_mean, distance_std, distance_max,
-                                    second_best_score, score_margin, created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    second_best_score, score_margin, pool_id, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 (
                                     match.get("user_id"),
@@ -162,6 +191,7 @@ class SQLiteDB:
                                     float(match.get("distance_max", 0.0)),
                                     match.get("second_best_score"),
                                     match.get("score_margin"),
+                                    match.get("pool_id"),
                                     match.get("created_at") or datetime.now(timezone.utc).isoformat(),
                                 ),
                             )
@@ -187,6 +217,9 @@ class SQLiteDB:
             "email": row["email"],
             "password_hash": row["password_hash"],
             "password_salt": row["password_salt"],
+            "role": row["role"],
+            "pool_id": row["pool_id"],
+            "pool": self.get_pool(row["pool_id"]),
             "created_at": row["created_at"],
             "embeddings": [json.loads(item["embedding_json"]) for item in embeddings_rows],
         }
@@ -195,7 +228,7 @@ class SQLiteDB:
         with self.store.connection() as conn:
             row = conn.execute(
                 """
-                SELECT user_id, email, password_hash, password_salt, created_at
+                SELECT user_id, email, password_hash, password_salt, role, pool_id, created_at
                 FROM users
                 WHERE email = ?
                 """,
@@ -207,7 +240,7 @@ class SQLiteDB:
         with self.store.connection() as conn:
             row = conn.execute(
                 """
-                SELECT user_id, email, password_hash, password_salt, created_at
+                SELECT user_id, email, password_hash, password_salt, role, pool_id, created_at
                 FROM users
                 WHERE user_id = ?
                 """,
@@ -234,12 +267,14 @@ class SQLiteDB:
                     conn.rollback()
                     return None
 
+                role = self._derive_role(email, conn=conn)
+
                 conn.execute(
                     """
-                    INSERT INTO users (user_id, email, password_hash, password_salt, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO users (user_id, email, password_hash, password_salt, role, pool_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, email, password_hash, password_salt, created_at),
+                    (user_id, email, password_hash, password_salt, role, None, created_at),
                 )
                 conn.commit()
             except Exception:
@@ -251,6 +286,9 @@ class SQLiteDB:
             "email": email,
             "password_hash": password_hash,
             "password_salt": password_salt,
+            "role": role,
+            "pool_id": None,
+            "pool": None,
             "created_at": created_at,
             "embeddings": [],
         }
@@ -268,7 +306,7 @@ class SQLiteDB:
             try:
                 user_row = conn.execute(
                     """
-                    SELECT user_id, email, password_hash, password_salt, created_at
+                    SELECT user_id, email, password_hash, password_salt, role, pool_id, created_at
                     FROM users
                     WHERE user_id = ?
                     """,
@@ -308,6 +346,151 @@ class SQLiteDB:
 
         return self.get_user_by_id(user_id)
 
+    def list_pools(self) -> list[dict[str, Any]]:
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT pool_id, name, created_by, created_at, updated_at
+                FROM pools
+                ORDER BY datetime(created_at) ASC, pool_id ASC
+                """
+            ).fetchall()
+        return [self._pool_from_row(row) for row in rows]
+
+    def get_pool(self, pool_id: str | None) -> dict[str, Any] | None:
+        if not pool_id:
+            return None
+        with self.store.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT pool_id, name, created_by, created_at, updated_at
+                FROM pools
+                WHERE pool_id = ?
+                """,
+                (pool_id,),
+            ).fetchone()
+        return self._pool_from_row(row) if row else None
+
+    def create_pool(self, *, name: str, created_by: str) -> dict[str, Any]:
+        normalized_name = (name or "").strip()
+        if not normalized_name:
+            raise ValueError("Pool name is required")
+
+        pool_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT pool_id FROM pools WHERE lower(name) = lower(?)",
+                    (normalized_name,),
+                ).fetchone()
+                if existing:
+                    conn.rollback()
+                    raise ValueError("Pool name already exists")
+                conn.execute(
+                    """
+                    INSERT INTO pools (pool_id, name, created_by, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (pool_id, normalized_name, created_by, now, now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.get_pool(pool_id) or {
+            "pool_id": pool_id,
+            "name": normalized_name,
+            "created_by": created_by,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def update_user_pool(self, *, user_id: str, pool_id: str | None) -> dict[str, Any] | None:
+        if pool_id is not None and not self.get_pool(pool_id):
+            raise ValueError("Pool not found")
+        with self.store.connection() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET pool_id = ?
+                WHERE user_id = ?
+                """,
+                (pool_id, user_id),
+            )
+        return self.get_user_by_id(user_id)
+
+    def list_users(self, *, pool_id: str | None = None) -> list[dict[str, Any]]:
+        query = """
+            SELECT user_id, email, password_hash, password_salt, role, pool_id, created_at
+            FROM users
+        """
+        params: tuple[Any, ...] = ()
+        if pool_id is not None:
+            query += " WHERE pool_id = ?"
+            params = (pool_id,)
+        query += " ORDER BY datetime(created_at) ASC, user_id ASC"
+        with self.store.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._user_from_row(row) for row in rows]
+
+    def list_pool_reference_images(self, pool_id: str) -> list[dict[str, Any]]:
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ue.id, ue.user_id, u.email, ue.embedding_json, ue.source_image_s3, ue.created_at
+                FROM user_embeddings ue
+                INNER JOIN users u ON u.user_id = ue.user_id
+                WHERE u.pool_id = ?
+                ORDER BY datetime(ue.created_at) ASC, ue.id ASC
+                """,
+                (pool_id,),
+            ).fetchall()
+
+        images: list[dict[str, Any]] = []
+        for row in rows:
+            normalized = normalize_embedding_vector(json.loads(row["embedding_json"]))
+            if normalized is None:
+                continue
+            images.append(
+                {
+                    "reference_image_id": str(row["id"]),
+                    "user_embedding_id": str(row["id"]),
+                    "user_id": row["user_id"],
+                    "email": row["email"],
+                    "embedding": normalized.astype(float).tolist(),
+                    "source_image_s3": row["source_image_s3"],
+                    "created_at": row["created_at"],
+                }
+            )
+        return images
+
+    def delete_user_embedding(self, *, user_id: str, embedding_id: str) -> bool:
+        with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT id
+                    FROM user_embeddings
+                    WHERE user_id = ? AND id = ?
+                    """,
+                    (user_id, int(embedding_id)),
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    return False
+                conn.execute(
+                    "DELETE FROM user_embeddings WHERE id = ?",
+                    (int(embedding_id),),
+                )
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+
     def list_user_embeddings(self, user_id: str) -> list[dict[str, Any]]:
         with self.store.connection() as conn:
             rows = conn.execute(
@@ -327,6 +510,7 @@ class SQLiteDB:
                 continue
             embeddings.append(
                 {
+                    "reference_image_id": str(row["id"]),
                     "user_embedding_id": str(row["id"]),
                     "user_id": user_id,
                     "embedding": normalized.astype(float).tolist(),
@@ -366,6 +550,7 @@ class SQLiteDB:
                     distance_max,
                     second_best_score,
                     score_margin,
+                    pool_id,
                     created_at
                 FROM matches
                 WHERE user_id = ?
@@ -374,3 +559,145 @@ class SQLiteDB:
                 (user_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_matches_for_video(
+        self,
+        *,
+        video_id: str,
+        pool_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT
+                m.user_id,
+                u.email,
+                u.pool_id,
+                m.track_id,
+                m.video_id,
+                m.source_video_s3,
+                m.timestamp,
+                m.keyframe,
+                m.keyframe_s3,
+                m.score,
+                m.confidence,
+                m.distance,
+                m.embeddings_used,
+                m.distance_mean,
+                m.distance_std,
+                m.distance_max,
+                m.second_best_score,
+                m.score_margin,
+                m.pool_id AS match_pool_id,
+                m.created_at
+            FROM matches m
+            INNER JOIN users u ON u.user_id = m.user_id
+            WHERE m.video_id = ?
+        """
+        params: list[Any] = [video_id]
+        if pool_id is not None:
+            query += " AND u.pool_id = ?"
+            params.append(pool_id)
+        query += " ORDER BY m.score DESC, datetime(m.created_at) DESC, m.id DESC"
+        with self.store.connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_video_assignments(
+        self,
+        *,
+        pool_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self.store.connection() as conn:
+            self._ensure_column(conn, "matches", "pool_id", "TEXT")
+        query = """
+            SELECT DISTINCT
+                m.video_id,
+                m.user_id,
+                u.email,
+                u.pool_id,
+                MAX(m.score) AS best_score,
+                MAX(m.confidence) AS best_confidence
+            FROM matches m
+            INNER JOIN users u ON u.user_id = m.user_id
+            WHERE m.video_id IS NOT NULL
+        """
+        params: list[Any] = []
+        if pool_id is not None:
+            query += " AND u.pool_id = ?"
+            params.append(pool_id)
+        query += " GROUP BY m.video_id, m.user_id, u.email, u.pool_id"
+        with self.store.connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def _pool_from_row(self, row) -> dict[str, Any]:
+        return {
+            "pool_id": row["pool_id"],
+            "id": row["pool_id"],
+            "name": row["name"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _admin_emails(self) -> set[str]:
+        configured = os.environ.get("ADMIN_EMAILS", "").strip()
+        if not configured:
+            return set()
+        return {
+            item.strip().lower()
+            for item in configured.split(",")
+            if item.strip()
+        }
+
+    def _derive_role(
+        self,
+        email: str,
+        *,
+        conn=None,
+        prefer_first_admin: bool = True,
+    ) -> str:
+        normalized_email = (email or "").strip().lower()
+        admin_emails = self._admin_emails()
+        if normalized_email and normalized_email in admin_emails:
+            return "admin"
+        if admin_emails or not prefer_first_admin:
+            return "user"
+        if conn is not None:
+            existing_admin = conn.execute(
+                "SELECT 1 FROM users WHERE role = 'admin' LIMIT 1"
+            ).fetchone()
+            return "user" if existing_admin else "admin"
+        with self.store.connection() as temporary_conn:
+            existing_admin = temporary_conn.execute(
+                "SELECT 1 FROM users WHERE role = 'admin' LIMIT 1"
+            ).fetchone()
+        return "user" if existing_admin else "admin"
+
+    def _backfill_user_roles(self) -> None:
+        admin_emails = self._admin_emails()
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT user_id, email, role, created_at
+                FROM users
+                ORDER BY datetime(created_at) ASC, user_id ASC
+                """
+            ).fetchall()
+            if not rows:
+                return
+
+            updates: list[tuple[str, str]] = []
+            has_admin = False
+            for row in rows:
+                desired_role = "admin" if row["email"].strip().lower() in admin_emails else "user"
+                if not admin_emails and not has_admin:
+                    desired_role = "admin"
+                has_admin = has_admin or desired_role == "admin"
+                if row["role"] != desired_role:
+                    updates.append((desired_role, row["user_id"]))
+
+            if updates:
+                conn.executemany(
+                    "UPDATE users SET role = ? WHERE user_id = ?",
+                    updates,
+                )

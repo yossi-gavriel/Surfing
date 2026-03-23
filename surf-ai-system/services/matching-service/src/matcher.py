@@ -14,6 +14,7 @@ logger = get_logger("matcher")
 @dataclass
 class MatchResult:
     user_id: str
+    pool_id: str | None
     track_id: str
     camera_id: str | None
     video_id: str | None
@@ -55,7 +56,7 @@ class Matcher:
         self.config = config
 
     def match(self, payload: dict[str, Any]) -> MatchResult | None:
-        users = self.users_db.get_all_users()
+        users = self.users_db.get_all_users(pool_id=payload.get("pool_id"))
         if not users:
             logger.warning("No users available for matching")
             return None
@@ -480,6 +481,7 @@ class Matcher:
         confidence = max(0.0, min(1.0, 1.0 - best_candidate.aggregated_distance))
         return MatchResult(
             user_id=best_candidate.user_id,
+            pool_id=payload.get("pool_id"),
             track_id=str(payload["track_id"]),
             camera_id=payload.get("camera_id"),
             video_id=self._get_video_id(payload),

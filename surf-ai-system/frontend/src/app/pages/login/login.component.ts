@@ -199,7 +199,7 @@ export class LoginComponent {
         next: (response) => {
           this.auth.setSession(response);
           this.submitting.set(false);
-          this.router.navigate(['/upload-face']);
+          this.router.navigate([response.role === 'admin' ? '/admin' : '/upload-face']);
         },
         error: (error) => {
           this.submitting.set(false);

@@ -50,7 +50,7 @@ def normalize_email(email: str) -> str:
 def is_admin_email(email: str) -> bool:
     configured = os.environ.get("ADMIN_EMAILS", "").strip()
     if not configured:
-        return True
+        return False
 
     normalized_email = normalize_email(email)
     allowed = {
@@ -84,6 +84,8 @@ def create_access_token(user: dict[str, Any]) -> str:
     payload = {
         "sub": user["user_id"],
         "email": user["email"],
+        "role": user.get("role", "user"),
+        "pool_id": user.get("pool_id"),
         "iss": config.issuer,
         "aud": config.audience,
         "iat": issued_at,
@@ -125,6 +127,10 @@ def decode_access_token(token: str) -> dict[str, Any]:
         )
 
     return payload
+
+
+def is_admin_user(user: dict[str, Any]) -> bool:
+    return user.get("role") == "admin" or is_admin_email(user.get("email", ""))
 
 
 def _extract_bearer_token(authorization: str | None) -> str:

@@ -4,17 +4,25 @@ import { Component, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 
-import { AuthService } from '../../core/auth.service';
+import { AuthService, MeResponse } from '../../core/auth.service';
 
 interface AdminVideo {
   video_id: string;
   s3_path: string;
   status: 'uploaded' | 'processing' | 'completed' | 'failed';
   error_message: string | null;
+  pool_id?: string | null;
+  pool_users_count?: number;
   user_embeddings_count?: number;
   video_embeddings_count?: number;
   min_distance?: number | null;
   best_similarity?: number | null;
+  best_match_user_id?: string | null;
+  best_match_user_email?: string | null;
+  confirmed_match_user_id?: string | null;
+  confirmed_match_user_email?: string | null;
+  assigned_user_id?: string | null;
+  assigned_user_email?: string | null;
   threshold?: number;
   diagnostics?: {
     frame_processor?: {
@@ -43,9 +51,25 @@ interface CameraRecord {
   camera_id: string;
   name: string;
   url: string;
+  pool_id?: string | null;
   active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+interface PoolRecord {
+  id: string;
+  pool_id: string;
+  name: string;
+}
+
+interface AdminUser {
+  user_id: string;
+  email: string;
+  role: 'admin' | 'user';
+  pool_id: string | null;
+  reference_images_count: number;
+  latest_reference_image_url: string | null;
 }
 
 @Component({
@@ -56,9 +80,10 @@ interface CameraRecord {
     <section class="hero">
       <div>
         <p class="eyebrow">Admin control</p>
-        <h2>Run real ingestion from uploaded videos and live cameras.</h2>
+        <h2>Manage pools, uploads, and matching review.</h2>
         <p class="subcopy">
-          Upload a file, register RTSP sources, and watch processing status move through the pipeline.
+          Everything here is scoped to the active pool. Video ingestion, matching review, and manual
+          assignment stay inside the same pool.
         </p>
       </div>
       <button (click)="refresh()" [disabled]="loading()">{{ loading() ? 'Refreshing...' : 'Refresh' }}</button>
@@ -69,6 +94,36 @@ interface CameraRecord {
 
     <section class="admin-grid">
       <article class="panel">
+        <p class="panel-label">Pool management</p>
+        <h3>Create and activate pools</h3>
+
+        <label>
+          <span>Active pool</span>
+          <select [(ngModel)]="selectedPoolId">
+            <option [ngValue]="''">Choose a pool</option>
+            <option *ngFor="let pool of pools()" [ngValue]="pool.pool_id">{{ pool.name }}</option>
+          </select>
+        </label>
+
+        <div class="actions">
+          <button (click)="saveActivePool()" [disabled]="savingPool() || !selectedPoolId">
+            {{ savingPool() ? 'Saving...' : 'Set active pool' }}
+          </button>
+        </div>
+
+        <label>
+          <span>New pool name</span>
+          <input [(ngModel)]="newPoolName" placeholder="Morning Session" />
+        </label>
+
+        <div class="actions">
+          <button (click)="createPool()" [disabled]="creatingPool() || !newPoolName.trim()">
+            {{ creatingPool() ? 'Creating...' : 'Create pool' }}
+          </button>
+        </div>
+      </article>
+
+      <article class="panel">
         <p class="panel-label">Video upload</p>
         <h3>Queue a new video</h3>
         <label class="dropzone">
@@ -78,7 +133,7 @@ interface CameraRecord {
         </label>
 
         <div class="actions">
-          <button (click)="uploadVideo()" [disabled]="!selectedVideo() || uploadingVideo()">
+          <button (click)="uploadVideo()" [disabled]="!selectedVideo() || uploadingVideo() || !selectedPoolId">
             {{ uploadingVideo() ? 'Uploading...' : 'Upload video' }}
           </button>
         </div>
@@ -104,9 +159,36 @@ interface CameraRecord {
         </label>
 
         <div class="actions">
-          <button (click)="saveCamera()" [disabled]="savingCamera()">
+          <button (click)="saveCamera()" [disabled]="savingCamera() || !selectedPoolId">
             {{ savingCamera() ? 'Saving...' : 'Save camera' }}
           </button>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="panel-label">Pool users</p>
+            <h3>Users in the active pool</h3>
+          </div>
+          <span class="status completed">{{ users().length }} users</span>
+        </div>
+
+        <div class="empty" *ngIf="!selectedPoolId">Select an active pool to see its users.</div>
+        <div class="empty" *ngIf="selectedPoolId && users().length === 0">No users belong to this pool yet.</div>
+
+        <div class="user-list" *ngIf="users().length > 0">
+          <div class="user-row" *ngFor="let user of users()">
+            <img *ngIf="user.latest_reference_image_url; else noUserImage" [src]="user.latest_reference_image_url" alt="Latest reference image" />
+            <ng-template #noUserImage>
+              <div class="user-placeholder">No image</div>
+            </ng-template>
+            <div class="user-copy">
+              <strong>{{ user.email }}</strong>
+              <span>{{ user.role }}</span>
+              <small>Reference images {{ user.reference_images_count }}</small>
+            </div>
+          </div>
         </div>
       </article>
     </section>
@@ -116,11 +198,12 @@ interface CameraRecord {
         <div class="section-header">
           <div>
             <p class="panel-label">Videos</p>
-            <h3>Processing status</h3>
+            <h3>Processing and matching status</h3>
           </div>
         </div>
 
-        <div class="empty" *ngIf="videos().length === 0 && !loading()">No videos uploaded yet.</div>
+        <div class="empty" *ngIf="!selectedPoolId">Set an active pool to start working with videos.</div>
+        <div class="empty" *ngIf="selectedPoolId && videos().length === 0 && !loading()">No videos uploaded yet.</div>
 
         <div class="video-list" *ngIf="videos().length > 0">
           <div class="video-row" *ngFor="let video of videos()">
@@ -129,24 +212,28 @@ interface CameraRecord {
               <span>{{ formatTimestamp(video.created_at) }}</span>
               <a *ngIf="video.source_video_url" [href]="video.source_video_url" target="_blank" rel="noopener">Open source</a>
               <small *ngIf="video.error_message">{{ video.error_message }}</small>
-              <div
-                class="metrics"
-                *ngIf="video.diagnostics || video.user_embeddings_count !== undefined || video.video_embeddings_count !== undefined"
-              >
-                <span *ngIf="video.diagnostics?.frame_processor?.sampled_frames">Frames {{ video.diagnostics?.frame_processor?.sampled_frames }}</span>
-                <span *ngIf="video.diagnostics?.frame_processor?.detections !== undefined">Detections {{ video.diagnostics?.frame_processor?.detections }}</span>
-                <span *ngIf="video.diagnostics?.frame_processor?.output_tracks !== undefined">Tracks {{ video.diagnostics?.frame_processor?.output_tracks }}</span>
-                <span *ngIf="video.diagnostics?.embedding_service?.tracks_with_embeddings !== undefined">Embedded tracks {{ video.diagnostics?.embedding_service?.tracks_with_embeddings }}</span>
-                <span *ngIf="video.diagnostics?.embedding_service?.tracks_without_faces !== undefined">No-face tracks {{ video.diagnostics?.embedding_service?.tracks_without_faces }}</span>
-                <span *ngIf="video.diagnostics?.embedding_service?.tracks_below_matching_threshold !== undefined">Below match threshold {{ video.diagnostics?.embedding_service?.tracks_below_matching_threshold }}</span>
-                <span *ngIf="video.user_embeddings_count !== undefined">User embeddings {{ video.user_embeddings_count }}</span>
+              <div class="metrics">
+                <span *ngIf="video.user_embeddings_count !== undefined">Pool embeddings {{ video.user_embeddings_count }}</span>
                 <span *ngIf="video.video_embeddings_count !== undefined">Video embeddings {{ video.video_embeddings_count }}</span>
                 <span *ngIf="video.best_similarity !== null && video.best_similarity !== undefined">Best similarity {{ formatMetric(video.best_similarity) }}</span>
+                <span *ngIf="video.pool_users_count !== undefined">Pool users {{ video.pool_users_count }}</span>
               </div>
               <small class="debug" *ngIf="video.min_distance !== null && video.min_distance !== undefined">
                 Best match distance: {{ formatMetric(video.min_distance) }} (threshold {{ formatMetric(video.threshold ?? 0) }})
               </small>
-              <small class="hint" *ngIf="matchingHint(video)">{{ matchingHint(video) }}</small>
+              <small class="hint" *ngIf="video.best_match_user_email">Best candidate: {{ video.best_match_user_email }}</small>
+              <small class="hint" *ngIf="video.confirmed_match_user_email">Confirmed match: {{ video.confirmed_match_user_email }}</small>
+              <small class="hint" *ngIf="video.assigned_user_email">Assigned to: {{ video.assigned_user_email }}</small>
+
+              <div class="assign-bar" *ngIf="users().length > 0">
+                <select [ngModel]="assignmentSelection(video)" (ngModelChange)="setAssignmentSelection(video.video_id, $event)">
+                  <option [ngValue]="''">No assignment</option>
+                  <option *ngFor="let user of users()" [ngValue]="user.user_id">{{ user.email }}</option>
+                </select>
+                <button class="secondary" type="button" (click)="assignVideo(video)" [disabled]="assigningVideoId() === video.video_id">
+                  {{ assigningVideoId() === video.video_id ? 'Saving...' : 'Save assignment' }}
+                </button>
+              </div>
             </div>
 
             <div class="video-meta">
@@ -160,11 +247,7 @@ interface CameraRecord {
               >
                 {{ processingVideoId() === video.video_id ? 'Queueing...' : 'Trigger pipeline' }}
               </button>
-              <button
-                class="secondary"
-                type="button"
-                (click)="openVideoDebug(video.video_id)"
-              >
+              <button class="secondary" type="button" (click)="openVideoDebug(video.video_id)">
                 Open debug view
               </button>
             </div>
@@ -180,7 +263,8 @@ interface CameraRecord {
           </div>
         </div>
 
-        <div class="empty" *ngIf="cameras().length === 0 && !loading()">No cameras configured yet.</div>
+        <div class="empty" *ngIf="!selectedPoolId">Select an active pool to see cameras.</div>
+        <div class="empty" *ngIf="selectedPoolId && cameras().length === 0 && !loading()">No cameras configured yet.</div>
 
         <div class="camera-list" *ngIf="cameras().length > 0">
           <div class="camera-row" *ngFor="let camera of cameras()">
@@ -214,9 +298,13 @@ interface CameraRecord {
       margin-bottom: 1.5rem;
     }
 
-    .admin-grid,
-    .lists-grid {
+    .admin-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 1.25rem;
+    }
+
+    .lists-grid {
+      grid-template-columns: 1.4fr 0.8fr;
       margin-bottom: 1.25rem;
     }
 
@@ -238,7 +326,7 @@ interface CameraRecord {
 
     h2 {
       font-size: 2.5rem;
-      max-width: 12ch;
+      max-width: 14ch;
     }
 
     h3 {
@@ -277,6 +365,30 @@ interface CameraRecord {
       color: #1d6d4f;
     }
 
+    label {
+      display: grid;
+      gap: 0.45rem;
+      margin-top: 1rem;
+    }
+
+    input[type='text'],
+    input:not([type='checkbox']),
+    select {
+      width: 100%;
+      border: 1px solid rgba(20, 60, 68, 0.16);
+      border-radius: 16px;
+      padding: 0.9rem 1rem;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--ink-strong);
+      font: inherit;
+    }
+
+    .checkbox {
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
     .dropzone {
       display: grid;
       gap: 0.5rem;
@@ -302,37 +414,18 @@ interface CameraRecord {
     .video-copy span,
     .video-copy small,
     .camera-row span,
+    .user-copy span,
     label span {
       color: var(--ink-soft);
-    }
-
-    label {
-      display: grid;
-      gap: 0.45rem;
-      margin-top: 1rem;
-    }
-
-    input[type='text'],
-    input:not([type='checkbox']) {
-      width: 100%;
-      border: 1px solid rgba(20, 60, 68, 0.16);
-      border-radius: 16px;
-      padding: 0.9rem 1rem;
-      background: rgba(255, 255, 255, 0.92);
-      color: var(--ink-strong);
-    }
-
-    .checkbox {
-      grid-template-columns: auto 1fr;
-      align-items: center;
-      gap: 0.75rem;
     }
 
     .actions,
     .section-header,
     .video-row,
     .camera-row,
-    .video-meta {
+    .video-meta,
+    .user-row,
+    .assign-bar {
       display: flex;
       justify-content: space-between;
       gap: 0.75rem;
@@ -343,14 +436,16 @@ interface CameraRecord {
     }
 
     .video-list,
-    .camera-list {
+    .camera-list,
+    .user-list {
       display: grid;
       gap: 0.85rem;
       margin-top: 1rem;
     }
 
     .video-row,
-    .camera-row {
+    .camera-row,
+    .user-row {
       align-items: center;
       padding: 1rem;
       border-radius: 20px;
@@ -359,7 +454,8 @@ interface CameraRecord {
     }
 
     .video-copy,
-    .camera-row div {
+    .camera-row div,
+    .user-copy {
       display: grid;
       gap: 0.2rem;
       min-width: 0;
@@ -381,7 +477,8 @@ interface CameraRecord {
     }
 
     .video-copy strong,
-    .camera-row strong {
+    .camera-row strong,
+    .user-copy strong {
       overflow-wrap: anywhere;
     }
 
@@ -390,12 +487,7 @@ interface CameraRecord {
       text-decoration: none;
     }
 
-    .hint {
-      margin-top: 0.35rem;
-      color: #8a5c13;
-      line-height: 1.5;
-    }
-
+    .hint,
     .debug {
       margin-top: 0.35rem;
       color: var(--accent-deep);
@@ -423,6 +515,31 @@ interface CameraRecord {
     .status.failed {
       background: rgba(167, 52, 27, 0.12);
       color: #a7341b;
+    }
+
+    .user-row img,
+    .user-placeholder {
+      width: 72px;
+      height: 72px;
+      border-radius: 18px;
+      object-fit: cover;
+      background: linear-gradient(135deg, rgba(193, 230, 223, 0.75), rgba(255, 238, 210, 0.8));
+    }
+
+    .user-placeholder {
+      display: grid;
+      place-items: center;
+      color: var(--ink-soft);
+      font-size: 0.8rem;
+    }
+
+    .assign-bar {
+      align-items: center;
+      margin-top: 0.8rem;
+    }
+
+    .assign-bar select {
+      min-width: 220px;
     }
 
     .empty {
@@ -461,14 +578,22 @@ interface CameraRecord {
       .hero,
       .video-row,
       .camera-row,
-      .video-meta {
+      .video-meta,
+      .user-row,
+      .assign-bar {
         align-items: stretch;
       }
 
       .video-row,
       .camera-row,
-      .video-meta {
+      .video-meta,
+      .user-row,
+      .assign-bar {
         flex-direction: column;
+      }
+
+      .assign-bar select {
+        min-width: 0;
       }
     }
   `],
@@ -480,14 +605,23 @@ export class AdminComponent {
 
   readonly videos = signal<AdminVideo[]>([]);
   readonly cameras = signal<CameraRecord[]>([]);
+  readonly pools = signal<PoolRecord[]>([]);
+  readonly users = signal<AdminUser[]>([]);
   readonly loading = signal(false);
   readonly uploadingVideo = signal(false);
   readonly savingCamera = signal(false);
+  readonly savingPool = signal(false);
+  readonly creatingPool = signal(false);
   readonly processingVideoId = signal<string | null>(null);
+  readonly assigningVideoId = signal<string | null>(null);
   readonly selectedVideo = signal<File | null>(null);
   readonly selectedVideoName = signal('');
   readonly successMessage = signal('');
   readonly errorMessage = signal('');
+  readonly assignmentSelections = signal<Record<string, string>>({});
+
+  selectedPoolId = '';
+  newPoolName = '';
 
   readonly cameraForm = {
     name: '',
@@ -502,6 +636,49 @@ export class AdminComponent {
   refresh(): void {
     this.loading.set(true);
     this.errorMessage.set('');
+    this.loadMe();
+  }
+
+  loadMe(): void {
+    this.http
+      .get<MeResponse>('/api/me', {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (me) => {
+          this.auth.setProfile(me);
+          this.selectedPoolId = me.pool_id ?? '';
+          this.loadPools();
+        },
+        error: (error) => this.handleHttpError(error, 'Unable to load admin profile.'),
+      });
+  }
+
+  loadPools(): void {
+    this.http
+      .get<PoolRecord[]>('/api/admin/pools', {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (pools) => {
+          this.pools.set(pools);
+          if (!this.selectedPoolId && pools.length > 0 && this.auth.poolId()) {
+            this.selectedPoolId = this.auth.poolId() ?? '';
+          }
+          this.loadVideos();
+        },
+        error: (error) => this.handleHttpError(error, 'Unable to load pools.'),
+      });
+  }
+
+  loadVideos(): void {
+    if (!this.selectedPoolId) {
+      this.videos.set([]);
+      this.cameras.set([]);
+      this.users.set([]);
+      this.loading.set(false);
+      return;
+    }
 
     this.http
       .get<AdminVideo[]>('/api/admin/videos', {
@@ -510,7 +687,11 @@ export class AdminComponent {
       .subscribe({
         next: (videos) => {
           this.videos.set(videos);
+          this.assignmentSelections.set(
+            Object.fromEntries(videos.map((video) => [video.video_id, video.assigned_user_id ?? ''])),
+          );
           this.loadCameras();
+          this.loadUsers();
         },
         error: (error) => this.handleHttpError(error, 'Unable to load admin videos.'),
       });
@@ -527,6 +708,73 @@ export class AdminComponent {
           this.loading.set(false);
         },
         error: (error) => this.handleHttpError(error, 'Unable to load cameras.'),
+      });
+  }
+
+  loadUsers(): void {
+    this.http
+      .get<AdminUser[]>('/api/admin/users', {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (users) => this.users.set(users),
+        error: (error) => this.handleHttpError(error, 'Unable to load pool users.'),
+      });
+  }
+
+  saveActivePool(): void {
+    if (!this.selectedPoolId) {
+      return;
+    }
+
+    this.savingPool.set(true);
+    this.successMessage.set('');
+    this.errorMessage.set('');
+
+    this.http
+      .put<MeResponse>('/api/me/pool', { pool_id: this.selectedPoolId }, {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (response) => {
+          this.auth.setProfile(response);
+          this.savingPool.set(false);
+          this.successMessage.set('Active pool updated.');
+          this.loadVideos();
+        },
+        error: (error) => {
+          this.savingPool.set(false);
+          this.handleHttpError(error, 'Unable to update active pool.');
+        },
+      });
+  }
+
+  createPool(): void {
+    if (!this.newPoolName.trim()) {
+      return;
+    }
+
+    this.creatingPool.set(true);
+    this.successMessage.set('');
+    this.errorMessage.set('');
+
+    this.http
+      .post<PoolRecord>('/api/admin/pools', { name: this.newPoolName.trim() }, {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (pool) => {
+          this.creatingPool.set(false);
+          this.newPoolName = '';
+          this.selectedPoolId = pool.pool_id;
+          this.successMessage.set(`Pool ${pool.name} created.`);
+          this.loadPools();
+          this.saveActivePool();
+        },
+        error: (error) => {
+          this.creatingPool.set(false);
+          this.handleHttpError(error, 'Unable to create pool.');
+        },
       });
   }
 
@@ -562,7 +810,7 @@ export class AdminComponent {
           this.selectedVideo.set(null);
           this.selectedVideoName.set('');
           this.successMessage.set(response.message);
-          this.refresh();
+          this.loadVideos();
         },
         error: (error) => {
           this.uploadingVideo.set(false);
@@ -600,7 +848,7 @@ export class AdminComponent {
           this.cameraForm.url = '';
           this.cameraForm.active = true;
           this.successMessage.set(`Camera ${camera.name} saved.`);
-          this.refresh();
+          this.loadCameras();
         },
         error: (error) => {
           this.savingCamera.set(false);
@@ -622,11 +870,42 @@ export class AdminComponent {
         next: (response) => {
           this.processingVideoId.set(null);
           this.successMessage.set(response.message);
-          this.refresh();
+          this.loadVideos();
         },
         error: (error) => {
           this.processingVideoId.set(null);
           this.handleHttpError(error, 'Unable to trigger processing.');
+        },
+      });
+  }
+
+  setAssignmentSelection(videoId: string, userId: string): void {
+    this.assignmentSelections.update((current) => ({ ...current, [videoId]: userId }));
+  }
+
+  assignmentSelection(video: AdminVideo): string {
+    return this.assignmentSelections()[video.video_id] ?? video.assigned_user_id ?? '';
+  }
+
+  assignVideo(video: AdminVideo): void {
+    const userId = this.assignmentSelection(video) || null;
+    this.assigningVideoId.set(video.video_id);
+    this.successMessage.set('');
+    this.errorMessage.set('');
+
+    this.http
+      .post<{ message: string }>(`/api/admin/videos/${video.video_id}/assign`, { user_id: userId }, {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (response) => {
+          this.assigningVideoId.set(null);
+          this.successMessage.set(response.message);
+          this.loadVideos();
+        },
+        error: (error) => {
+          this.assigningVideoId.set(null);
+          this.handleHttpError(error, 'Unable to save video assignment.');
         },
       });
   }
@@ -642,28 +921,6 @@ export class AdminComponent {
 
   formatMetric(value: number, digits = 3): string {
     return Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
-  }
-
-  matchingHint(video: AdminVideo): string {
-    const diagnostics = video.diagnostics;
-    const outputTracks = diagnostics?.frame_processor?.output_tracks ?? 0;
-    const embeddedTracks = diagnostics?.embedding_service?.tracks_with_embeddings ?? 0;
-    const belowThreshold = diagnostics?.embedding_service?.tracks_below_matching_threshold ?? 0;
-    const noFaceTracks = diagnostics?.embedding_service?.tracks_without_faces ?? 0;
-
-    if (video.status !== 'completed') {
-      return '';
-    }
-    if (outputTracks === 0) {
-      return 'The frame processor completed, but it did not produce any qualifying tracks.';
-    }
-    if (embeddedTracks === 0 && noFaceTracks > 0) {
-      return 'Tracks were created, but the face embedder could not extract a usable face from the keyframes.';
-    }
-    if (belowThreshold > 0) {
-      return 'At least one track had too little face evidence for matching, so no match could be created.';
-    }
-    return '';
   }
 
   private handleHttpError(error: any, fallbackMessage: string): void {

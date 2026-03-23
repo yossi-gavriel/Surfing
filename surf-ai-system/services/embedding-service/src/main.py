@@ -305,6 +305,7 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
     output_data = {
         "track_id": track_id,
         "camera_id": camera_id,
+        "pool_id": msg_body.get("pool_id"),
         "video_id": msg_body.get("video_id"),
         "source_video_id": msg_body.get("source_video_id"),
         "source_video_s3": msg_body.get("source_video_s3"),

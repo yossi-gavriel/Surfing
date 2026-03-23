@@ -7,6 +7,8 @@ import { AuthService } from '../../core/auth.service';
 
 interface DebugReferenceImage {
   user_embedding_id: string;
+  user_id?: string;
+  user_email?: string | null;
   image_url: string | null;
   created_at: string;
 }
@@ -23,6 +25,10 @@ interface DebugVideoFrame {
   start_time?: string | null;
   end_time?: string | null;
   best_user_embedding_id?: string | null;
+  best_user_id?: string | null;
+  best_user_email?: string | null;
+  user_id?: string | null;
+  user_email?: string | null;
   best_reference_image_url?: string | null;
   bbox?: number[] | null;
   face_bbox?: number[] | null;
@@ -41,12 +47,25 @@ interface DebugCompareResponse {
   video_id: string;
   user_embeddings: number;
   video_embeddings: number;
+  pool_id?: string | null;
+  pool_users?: number;
   threshold: number;
+  best_match_user_id?: string | null;
+  best_match_user_email?: string | null;
   best_reference_user_embedding_id: string | null;
   best_reference_image_url: string | null;
   reference_images: DebugReferenceImage[];
   video_frames: DebugVideoFrame[];
   debug_frames: DebugVideoFrame[];
+  matches?: Array<{
+    user_id: string;
+    email: string;
+    score: number;
+    confidence: number;
+    distance: number;
+  }>;
+  assigned_user_id?: string | null;
+  assigned_user_email?: string | null;
   summary: {
     total_frames: number;
     valid_frames: number;
@@ -67,7 +86,7 @@ interface DebugCompareResponse {
         <p class="eyebrow">Video debug</p>
         <h2>{{ debugData()?.video_id || videoId }}</h2>
         <p class="subcopy">
-          Reference face on top, then every stored video keyframe ranked by its best similarity to the uploaded face.
+          Best pool reference image on top, then every stored video frame ranked against the active pool.
         </p>
       </div>
       <button type="button" (click)="loadDebug()" [disabled]="loading()">
@@ -84,9 +103,10 @@ interface DebugCompareResponse {
         <div class="panel-header">
           <div>
             <p class="panel-label">Reference image</p>
-            <h3>Uploaded face</h3>
+            <h3>Best reference image</h3>
           </div>
           <div class="pill-group">
+            <span class="pill">Pool users {{ debug.pool_users ?? 0 }}</span>
             <span class="pill">User embeddings {{ debug.user_embeddings }}</span>
             <span class="pill">Video embeddings {{ debug.video_embeddings }}</span>
             <span class="pill">Threshold {{ formatMetric(debug.threshold) }}</span>
@@ -115,9 +135,11 @@ interface DebugCompareResponse {
           </div>
         </div>
 
-        <div class="summary-row">
+          <div class="summary-row">
           <span class="pill">Best similarity {{ formatNullableMetric(debug.summary.best_similarity) }}</span>
           <span class="pill">Best distance {{ formatNullableMetric(debug.summary.best_distance) }}</span>
+          <span class="pill" *ngIf="debug.best_match_user_email">Best user {{ debug.best_match_user_email }}</span>
+          <span class="pill" *ngIf="debug.assigned_user_email">Assigned {{ debug.assigned_user_email }}</span>
           <span class="pill" [class.force]="debug.summary.force_match">Force match {{ debug.summary.force_match ? 'yes' : 'no' }}</span>
         </div>
 
@@ -144,6 +166,7 @@ interface DebugCompareResponse {
               <div class="metrics">
                 <span>Distance {{ formatNullableMetric(frame.distance) }}</span>
                 <span>Similarity {{ formatNullableMetric(frame.similarity) }}</span>
+                <span *ngIf="frame.user_email">User {{ frame.user_email }}</span>
                 <span>Has face {{ frame.hasFaceLabel }}</span>
                 <span>Valid {{ frame.validLabel }}</span>
                 <span>Used {{ frame.usedLabel }}</span>

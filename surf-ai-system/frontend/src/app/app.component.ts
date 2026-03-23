@@ -1,8 +1,9 @@
 import { CommonModule } from '@angular/common';
+import { HttpClient } from '@angular/common/http';
 import { Component, inject } from '@angular/core';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 
-import { AuthService } from './core/auth.service';
+import { AuthService, MeResponse } from './core/auth.service';
 
 @Component({
   selector: 'app-root',
@@ -14,8 +15,8 @@ import { AuthService } from './core/auth.service';
         <a routerLink="/my-videos" class="brand">Surf AI</a>
 
         <nav *ngIf="auth.isAuthenticated()">
-          <a routerLink="/admin" routerLinkActive="active">Admin</a>
-          <a routerLink="/upload-face" routerLinkActive="active">Upload Face</a>
+          <a *ngIf="auth.isAdmin()" routerLink="/admin" routerLinkActive="active">Admin</a>
+          <a routerLink="/upload-face" routerLinkActive="active">My Profile</a>
           <a routerLink="/my-videos" routerLinkActive="active">My Videos</a>
           <button type="button" (click)="logout()">Log out</button>
         </nav>
@@ -97,7 +98,22 @@ import { AuthService } from './core/auth.service';
 })
 export class AppComponent {
   protected readonly auth = inject(AuthService);
+  private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
+
+  constructor() {
+    if (this.auth.isAuthenticated()) {
+      this.http
+        .get('/api/me', { headers: this.auth.authHeaders() })
+        .subscribe({
+          next: (profile) => this.auth.setProfile(profile as MeResponse),
+          error: () => {
+            this.auth.clearSession();
+            this.router.navigate(['/login']);
+          },
+        });
+    }
+  }
 
   logout(): void {
     this.auth.clearSession();

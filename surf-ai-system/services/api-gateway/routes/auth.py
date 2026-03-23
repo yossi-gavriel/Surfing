@@ -20,7 +20,7 @@ class AuthRequest(BaseModel):
 
 
 @router.post("/signup")
-def signup(payload: AuthRequest, request: Request) -> dict[str, str]:
+def signup(payload: AuthRequest, request: Request) -> dict[str, str | None]:
     request.app.state.metrics.increment("auth.signup.attempt")
     email = normalize_email(payload.email)
     if not email or "@" not in email:
@@ -51,11 +51,17 @@ def signup(payload: AuthRequest, request: Request) -> dict[str, str]:
     token = create_access_token(user)
     request.app.state.metrics.increment("auth.signup.success")
     logger.info("User signed up: user_id=%s", user["user_id"])
-    return {"user_id": user["user_id"], "token": token}
+    return {
+        "user_id": user["user_id"],
+        "token": token,
+        "email": user["email"],
+        "role": user.get("role", "user"),
+        "pool_id": user.get("pool_id"),
+    }
 
 
 @router.post("/login")
-def login(payload: AuthRequest, request: Request) -> dict[str, str]:
+def login(payload: AuthRequest, request: Request) -> dict[str, str | None]:
     request.app.state.metrics.increment("auth.login.attempt")
     email = normalize_email(payload.email)
     user = request.app.state.db.get_user_by_email(email)
@@ -73,4 +79,10 @@ def login(payload: AuthRequest, request: Request) -> dict[str, str]:
     token = create_access_token(user)
     request.app.state.metrics.increment("auth.login.success")
     logger.info("User logged in: user_id=%s", user["user_id"])
-    return {"user_id": user["user_id"], "token": token}
+    return {
+        "user_id": user["user_id"],
+        "token": token,
+        "email": user["email"],
+        "role": user.get("role", "user"),
+        "pool_id": user.get("pool_id"),
+    }

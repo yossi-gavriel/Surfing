@@ -82,6 +82,7 @@ def upload_and_notify(camera_config: dict[str, Any], file_path: str) -> bool:
     message = {
         "type": "camera",
         "camera_id": camera_id,
+        "pool_id": camera_config.get("pool_id"),
         "video_id": os.path.splitext(filename)[0],
         "s3_path": s3_path,
         "timestamp": datetime.utcnow().isoformat(),
