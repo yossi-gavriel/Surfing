@@ -1,0 +1,1 @@
+{"commands":["bash -c 'echo \"=== DOCKER INSPECT ===\"; docker inspect frame-processor --format=\"{{json .Config.Cmd}}\"; echo \"=== DOCKERFILE CONTENT ===\"; cat /home/ubuntu/surf-ai-system/services/frame-processor/Dockerfile'"]}

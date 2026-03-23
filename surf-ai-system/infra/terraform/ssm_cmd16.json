@@ -1,0 +1,1 @@
+{"commands":["su - ubuntu -c 'set -e; cd /home/ubuntu/surf-ai-system && git pull origin main && cd infra && echo \"=== REBUILDING FRAME-PROCESSOR ===\" && docker-compose build --no-cache frame-processor && echo \"=== STARTING FRAME-PROCESSOR ===\" && docker-compose up -d frame-processor && sleep 5 && docker ps'"]}

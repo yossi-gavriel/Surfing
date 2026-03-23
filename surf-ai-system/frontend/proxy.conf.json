@@ -1,0 +1,7 @@
+{
+  "/api": {
+    "target": "http://api-gateway:8000",
+    "secure": false,
+    "changeOrigin": true
+  }
+}

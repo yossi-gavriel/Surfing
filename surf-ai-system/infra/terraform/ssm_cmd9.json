@@ -1,0 +1,1 @@
+{"commands":["bash -c 'cd /home/ubuntu/surf-ai-system/infra && docker-compose build --no-cache ingestion-service > /tmp/b.log 2>&1 || true; tail -n 50 /tmp/b.log'"]}

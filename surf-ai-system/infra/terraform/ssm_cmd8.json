@@ -1,0 +1,1 @@
+{"commands":["bash -c 'tail -n 100 /home/ubuntu/docker-compose-build.log'"]}

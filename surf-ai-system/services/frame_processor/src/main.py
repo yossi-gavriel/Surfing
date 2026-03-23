@@ -97,6 +97,9 @@ def process_chunk(msg_body: dict):
                 tracks_history[tid] = {
                     "camera_id": camera_id,
                     "track_id": str(tid),
+                    "video_id": os.path.splitext(filename)[0],
+                    "source_video_id": os.path.splitext(filename)[0],
+                    "source_video_s3": s3_path,
                     "bboxes": [],
                     "frames": [],
                     "frame_timestamps": [],

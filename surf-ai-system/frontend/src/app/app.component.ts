@@ -1,36 +1,105 @@
-import { Component } from '@angular/core';
-import { RouterOutlet } from '@angular/router';
+import { CommonModule } from '@angular/common';
+import { Component, inject } from '@angular/core';
+import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+
+import { AuthService } from './core/auth.service';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [RouterOutlet],
+  imports: [CommonModule, RouterOutlet, RouterLink, RouterLinkActive],
   template: `
-    <header class="app-header">
-      <h1>Surf AI Analytics Matrix</h1>
-    </header>
-    <main class="container">
-      <router-outlet></router-outlet>
-    </main>
+    <div class="shell">
+      <header class="app-header">
+        <a routerLink="/my-videos" class="brand">Surf AI</a>
+
+        <nav *ngIf="auth.isAuthenticated()">
+          <a routerLink="/upload-face" routerLinkActive="active">Upload Face</a>
+          <a routerLink="/my-videos" routerLinkActive="active">My Videos</a>
+          <button type="button" (click)="logout()">Log out</button>
+        </nav>
+      </header>
+
+      <main class="container">
+        <router-outlet></router-outlet>
+      </main>
+    </div>
   `,
   styles: [`
+    .shell {
+      min-height: 100vh;
+    }
+
     .app-header {
-      background: #2c3e50;
-      color: white;
-      padding: 1rem;
-      text-align: center;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      padding: 1.25rem 2rem;
+      margin: 1rem auto 0;
+      width: min(1180px, calc(100% - 2rem));
+      border-radius: 999px;
+      background: rgba(255, 250, 244, 0.72);
+      border: 1px solid rgba(20, 60, 68, 0.12);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 14px 34px rgba(13, 40, 45, 0.08);
     }
-    .app-header h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 600;
+
+    .brand {
+      color: var(--ink-strong);
+      text-decoration: none;
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
     }
+
+    nav {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    nav a,
+    nav button {
+      border: none;
+      background: transparent;
+      color: var(--ink-soft);
+      text-decoration: none;
+      font: inherit;
+      padding: 0.65rem 1rem;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+
+    nav a.active {
+      background: rgba(20, 82, 96, 0.1);
+      color: var(--accent-deep);
+    }
+
     .container {
-      max-width: 1200px;
+      max-width: 1180px;
       margin: 0 auto;
-      padding: 2rem 1rem;
+      padding: 2rem 1rem 3rem;
     }
-  `]
+
+    @media (max-width: 720px) {
+      .app-header {
+        border-radius: 28px;
+        padding: 1rem;
+        align-items: start;
+        flex-direction: column;
+      }
+    }
+  `],
 })
-export class AppComponent { }
+export class AppComponent {
+  protected readonly auth = inject(AuthService);
+  private readonly router = inject(Router);
+
+  logout(): void {
+    this.auth.clearSession();
+    this.router.navigate(['/login']);
+  }
+}

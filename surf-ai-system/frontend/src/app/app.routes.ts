@@ -1,9 +1,13 @@
 import { Routes } from '@angular/router';
-import { UploadComponent } from './upload/upload.component';
-import { ResultsComponent } from './results/results.component';
+import { authGuard } from './core/auth.guard';
+import { LoginComponent } from './pages/login/login.component';
+import { MyVideosComponent } from './pages/my-videos/my-videos.component';
+import { UploadFaceComponent } from './pages/upload-face/upload-face.component';
 
 export const routes: Routes = [
-  { path: '', redirectTo: 'upload', pathMatch: 'full' },
-  { path: 'upload', component: UploadComponent },
-  { path: 'rides/:id', component: ResultsComponent }
+  { path: '', redirectTo: 'my-videos', pathMatch: 'full' },
+  { path: 'login', component: LoginComponent },
+  { path: 'upload-face', component: UploadFaceComponent, canActivate: [authGuard] },
+  { path: 'my-videos', component: MyVideosComponent, canActivate: [authGuard] },
+  { path: '**', redirectTo: 'my-videos' },
 ];

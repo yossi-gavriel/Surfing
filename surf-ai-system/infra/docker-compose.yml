@@ -60,6 +60,17 @@ services:
     volumes:
       - db-data:/app/data
 
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    container_name: frontend
+    depends_on:
+      - api-gateway
+    ports:
+      - "4200:80"
+    restart: always
+
   clipper-service:
     build:
       context: ..

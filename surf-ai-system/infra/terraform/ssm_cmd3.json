@@ -1,0 +1,1 @@
+{"commands":["bash -c 'set -e; cd /home/ubuntu/surf-ai-system && git pull origin main; tail -n +91 /var/lib/cloud/instance/scripts/part-001 > /tmp/resume.sh; bash /tmp/resume.sh; echo ===STATUS===; docker ps -a; systemctl is-active nginx; curl -s http://localhost:8000/health; systemctl is-active surf-ai-frontend'"]}

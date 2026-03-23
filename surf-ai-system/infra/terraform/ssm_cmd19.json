@@ -1,0 +1,1 @@
+{"commands":["bash -c 'echo \"=== DOCKER PS ===\"; docker ps -a --filter \"name=frame-processor\"; echo \"=== DOCKER LOGS ===\"; docker logs frame-processor --tail=50'"]}
