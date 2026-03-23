@@ -12,6 +12,7 @@ from src.config import config
 from src.face_detector import FaceDetector
 from src.embedder import FaceEmbedder
 from src.aggregator import EmbeddingAggregator
+from shared.utils.face_preprocessing import preprocess_face, summarize_face_tensor
 from shared.utils.logger import get_logger
 from shared.utils.pipeline_store import PipelineStore
 
@@ -84,6 +85,7 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
         keyframes.append(msg_body["keyframe_s3"])
         
     keyframes = list(set(keyframes))
+    frames_received = len(keyframes)
     
     if not keyframes:
         logger.info(f"[{track_id}] No keyframes securely identified. Gracefully bypassing extraction arrays.")
@@ -132,6 +134,17 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
                 if valid_faces:
                     # Select robustly exclusively mapped logically via quality arrays
                     best_face_data = sorted(valid_faces, key=lambda x: x["quality_score"], reverse=True)[0]
+                    processed_face = preprocess_face(
+                        img,
+                        bbox=best_face_data["face"].bbox,
+                        kps=getattr(best_face_data["face"], "kps", None),
+                    )
+                    print(
+                        {
+                            "stage": "embedding_input",
+                            **summarize_face_tensor(processed_face),
+                        }
+                    )
                     
                     emb = embedder.extract_embedding(best_face_data["face"])
                     
@@ -143,7 +156,16 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
                     
             if os.path.exists(local_path):
                 os.remove(local_path)
-                
+
+    embeddings_created = len(faces_data)
+    print(
+        {
+            "track_id": track_id,
+            "frames_received": frames_received,
+            "embeddings_created": embeddings_created,
+        }
+    )
+
     agg_emb, final_conf, num_faces, avg_quality, consistency = aggregator.aggregate(faces_data)
     
     if agg_emb is None:
@@ -154,6 +176,19 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
             last_track_id=track_id,
         )
         return
+
+    video_embedding_record = None
+    if video_id:
+        video_embedding_record = pipeline_store.upsert_video_embedding(
+            video_id=video_id,
+            track_id=str(track_id),
+            camera_id=camera_id,
+            embedding=agg_emb,
+            frames_received=frames_received,
+            embeddings_created=embeddings_created,
+            confidence=float(final_conf),
+            consistency=float(consistency),
+        )
 
     below_threshold = 1 if num_faces < config.matching_min_track_embeddings else 0
     update_video_embedding_diagnostics(
@@ -174,6 +209,7 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
         "keyframe_s3": msg_body.get("keyframe_s3"),
         "start_time": msg_body.get("start_time"),
         "end_time": msg_body.get("end_time"),
+        "video_embedding_id": None if video_embedding_record is None else video_embedding_record["video_embedding_id"],
         "face_embedding": agg_emb,
         "embedding_confidence": float(final_conf),
         "num_faces_detected": num_faces,

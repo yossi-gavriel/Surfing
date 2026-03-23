@@ -4,6 +4,9 @@ import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
 
+from shared.utils.embeddings import normalize_embedding_vector
+from shared.utils.face_preprocessing import preprocess_face, summarize_face_tensor
+
 
 class FaceUploadError(Exception):
     def __init__(self, code: str, message: str, status_code: int = 400):
@@ -71,6 +74,18 @@ class FaceUploadService:
                 message="Image is too blurry. Upload a sharper image.",
             )
 
+        processed_face = preprocess_face(
+            image,
+            bbox=face.bbox,
+            kps=getattr(face, "kps", None),
+        )
+        print(
+            {
+                "stage": "embedding_input",
+                **summarize_face_tensor(processed_face),
+            }
+        )
+
         embedding = self._normalize_embedding(face.embedding)
         return {
             "embedding": embedding.tolist(),
@@ -89,12 +104,11 @@ class FaceUploadService:
         return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
     def _normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
-        vector = np.asarray(embedding, dtype=np.float32)
-        norm = np.linalg.norm(vector)
-        if norm <= 0:
+        normalized = normalize_embedding_vector(embedding)
+        if normalized is None:
             raise FaceUploadError(
                 code="bad_image",
                 message="Could not extract a usable face embedding",
                 status_code=422,
             )
-        return vector / norm
+        return normalized

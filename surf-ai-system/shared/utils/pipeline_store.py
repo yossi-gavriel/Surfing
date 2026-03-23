@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from shared.utils.embeddings import normalize_embedding_vector
 from shared.utils.sqlite_store import SQLiteStore
 
 
@@ -48,6 +49,30 @@ class PipelineStore:
                 """
             )
             self._ensure_column(conn, "videos", "diagnostics_json", "TEXT")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS video_embeddings (
+                    id TEXT PRIMARY KEY,
+                    video_id TEXT NOT NULL,
+                    track_id TEXT NOT NULL,
+                    camera_id TEXT,
+                    embedding_json TEXT NOT NULL,
+                    frames_received INTEGER NOT NULL DEFAULT 0,
+                    embeddings_created INTEGER NOT NULL DEFAULT 0,
+                    confidence REAL,
+                    consistency REAL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(video_id, track_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_video_embeddings_video_id
+                ON video_embeddings(video_id, created_at DESC)
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cameras (
@@ -184,6 +209,117 @@ class PipelineStore:
         merged = self._deep_merge_dicts(diagnostics, patch)
         return self.set_video_diagnostics(video_id, merged)
 
+    def upsert_video_embedding(
+        self,
+        *,
+        video_id: str,
+        track_id: str,
+        embedding: list[float],
+        camera_id: str | None = None,
+        frames_received: int = 0,
+        embeddings_created: int = 0,
+        confidence: float | None = None,
+        consistency: float | None = None,
+    ) -> dict[str, Any]:
+        normalized = normalize_embedding_vector(embedding)
+        if normalized is None:
+            raise ValueError("Video embedding cannot be normalized")
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.store.connection() as conn:
+            existing = conn.execute(
+                """
+                SELECT id, created_at
+                FROM video_embeddings
+                WHERE video_id = ? AND track_id = ?
+                """,
+                (video_id, track_id),
+            ).fetchone()
+
+            if existing:
+                embedding_id = existing["id"]
+                created_at = existing["created_at"]
+                conn.execute(
+                    """
+                    UPDATE video_embeddings
+                    SET camera_id = ?, embedding_json = ?, frames_received = ?, embeddings_created = ?,
+                        confidence = ?, consistency = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        camera_id,
+                        json.dumps(normalized.astype(float).tolist()),
+                        int(frames_received),
+                        int(embeddings_created),
+                        confidence,
+                        consistency,
+                        now,
+                        embedding_id,
+                    ),
+                )
+            else:
+                embedding_id = str(uuid.uuid4())
+                created_at = now
+                conn.execute(
+                    """
+                    INSERT INTO video_embeddings (
+                        id, video_id, track_id, camera_id, embedding_json, frames_received,
+                        embeddings_created, confidence, consistency, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        embedding_id,
+                        video_id,
+                        track_id,
+                        camera_id,
+                        json.dumps(normalized.astype(float).tolist()),
+                        int(frames_received),
+                        int(embeddings_created),
+                        confidence,
+                        consistency,
+                        created_at,
+                        now,
+                    ),
+                )
+
+        return {
+            "video_embedding_id": embedding_id,
+            "video_id": video_id,
+            "track_id": track_id,
+            "camera_id": camera_id,
+            "embedding": normalized.astype(float).tolist(),
+            "frames_received": int(frames_received),
+            "embeddings_created": int(embeddings_created),
+            "confidence": confidence,
+            "consistency": consistency,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+
+    def list_video_embeddings(self, video_id: str) -> list[dict[str, Any]]:
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    video_id,
+                    track_id,
+                    camera_id,
+                    embedding_json,
+                    frames_received,
+                    embeddings_created,
+                    confidence,
+                    consistency,
+                    created_at,
+                    updated_at
+                FROM video_embeddings
+                WHERE video_id = ?
+                ORDER BY datetime(created_at) ASC, id ASC
+                """,
+                (video_id,),
+            ).fetchall()
+        return [self._video_embedding_from_row(row) for row in rows]
+
     def upsert_camera(
         self,
         *,
@@ -261,6 +397,24 @@ class PipelineStore:
             "name": row["name"],
             "url": row["url"],
             "active": bool(row["active"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _video_embedding_from_row(self, row) -> dict[str, Any]:
+        raw_embedding = json.loads(row["embedding_json"])
+        normalized = normalize_embedding_vector(raw_embedding)
+        embedding = raw_embedding if normalized is None else normalized.astype(float).tolist()
+        return {
+            "video_embedding_id": row["id"],
+            "video_id": row["video_id"],
+            "track_id": row["track_id"],
+            "camera_id": row["camera_id"],
+            "embedding": embedding,
+            "frames_received": int(row["frames_received"]),
+            "embeddings_created": int(row["embeddings_created"]),
+            "confidence": row["confidence"],
+            "consistency": row["consistency"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

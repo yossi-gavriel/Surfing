@@ -11,6 +11,11 @@ interface AdminVideo {
   s3_path: string;
   status: 'uploaded' | 'processing' | 'completed' | 'failed';
   error_message: string | null;
+  user_embeddings_count?: number;
+  video_embeddings_count?: number;
+  min_distance?: number | null;
+  best_similarity?: number | null;
+  threshold?: number;
   diagnostics?: {
     frame_processor?: {
       sampled_frames?: number;
@@ -124,14 +129,23 @@ interface CameraRecord {
               <span>{{ formatTimestamp(video.created_at) }}</span>
               <a *ngIf="video.source_video_url" [href]="video.source_video_url" target="_blank" rel="noopener">Open source</a>
               <small *ngIf="video.error_message">{{ video.error_message }}</small>
-              <div class="metrics" *ngIf="video.diagnostics">
-                <span *ngIf="video.diagnostics.frame_processor?.sampled_frames">Frames {{ video.diagnostics.frame_processor?.sampled_frames }}</span>
-                <span *ngIf="video.diagnostics.frame_processor?.detections !== undefined">Detections {{ video.diagnostics.frame_processor?.detections }}</span>
-                <span *ngIf="video.diagnostics.frame_processor?.output_tracks !== undefined">Tracks {{ video.diagnostics.frame_processor?.output_tracks }}</span>
-                <span *ngIf="video.diagnostics.embedding_service?.tracks_with_embeddings !== undefined">Embedded tracks {{ video.diagnostics.embedding_service?.tracks_with_embeddings }}</span>
-                <span *ngIf="video.diagnostics.embedding_service?.tracks_without_faces !== undefined">No-face tracks {{ video.diagnostics.embedding_service?.tracks_without_faces }}</span>
-                <span *ngIf="video.diagnostics.embedding_service?.tracks_below_matching_threshold !== undefined">Below match threshold {{ video.diagnostics.embedding_service?.tracks_below_matching_threshold }}</span>
+              <div
+                class="metrics"
+                *ngIf="video.diagnostics || video.user_embeddings_count !== undefined || video.video_embeddings_count !== undefined"
+              >
+                <span *ngIf="video.diagnostics?.frame_processor?.sampled_frames">Frames {{ video.diagnostics?.frame_processor?.sampled_frames }}</span>
+                <span *ngIf="video.diagnostics?.frame_processor?.detections !== undefined">Detections {{ video.diagnostics?.frame_processor?.detections }}</span>
+                <span *ngIf="video.diagnostics?.frame_processor?.output_tracks !== undefined">Tracks {{ video.diagnostics?.frame_processor?.output_tracks }}</span>
+                <span *ngIf="video.diagnostics?.embedding_service?.tracks_with_embeddings !== undefined">Embedded tracks {{ video.diagnostics?.embedding_service?.tracks_with_embeddings }}</span>
+                <span *ngIf="video.diagnostics?.embedding_service?.tracks_without_faces !== undefined">No-face tracks {{ video.diagnostics?.embedding_service?.tracks_without_faces }}</span>
+                <span *ngIf="video.diagnostics?.embedding_service?.tracks_below_matching_threshold !== undefined">Below match threshold {{ video.diagnostics?.embedding_service?.tracks_below_matching_threshold }}</span>
+                <span *ngIf="video.user_embeddings_count !== undefined">User embeddings {{ video.user_embeddings_count }}</span>
+                <span *ngIf="video.video_embeddings_count !== undefined">Video embeddings {{ video.video_embeddings_count }}</span>
+                <span *ngIf="video.best_similarity !== null && video.best_similarity !== undefined">Best similarity {{ formatMetric(video.best_similarity) }}</span>
               </div>
+              <small class="debug" *ngIf="video.min_distance !== null && video.min_distance !== undefined">
+                Best match distance: {{ formatMetric(video.min_distance) }} (threshold {{ formatMetric(video.threshold ?? 0) }})
+              </small>
               <small class="hint" *ngIf="matchingHint(video)">{{ matchingHint(video) }}</small>
             </div>
 
@@ -375,6 +389,12 @@ interface CameraRecord {
       line-height: 1.5;
     }
 
+    .debug {
+      margin-top: 0.35rem;
+      color: var(--accent-deep);
+      line-height: 1.5;
+    }
+
     .status {
       display: inline-flex;
       align-items: center;
@@ -607,6 +627,10 @@ export class AdminComponent {
   formatTimestamp(value: string): string {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  formatMetric(value: number, digits = 3): string {
+    return Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
   }
 
   matchingHint(video: AdminVideo): string {

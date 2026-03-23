@@ -2,11 +2,13 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
 from shared.utils.logger import get_logger
+from shared.utils.embeddings import pairwise_cosine_similarity, pairwise_euclidean_distances
 from src.security import get_current_user, is_admin_email
 
 logger = get_logger("api-admin")
@@ -28,6 +30,62 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
             detail="Admin access is required",
         )
     return current_user
+
+
+def _current_match_threshold() -> float:
+    try:
+        return float(os.environ.get("MATCH_THRESHOLD", "0.75"))
+    except (TypeError, ValueError):
+        return 0.75
+
+
+def _build_compare_response(request: Request, *, video_id: str, user_id: str) -> dict[str, Any]:
+    user_embeddings = request.app.state.db.list_user_embeddings(user_id)
+    video_embeddings = request.app.state.pipeline_store.list_video_embeddings(video_id)
+    threshold = _current_match_threshold()
+
+    comparisons: list[dict[str, Any]] = []
+    if user_embeddings and video_embeddings:
+        user_vectors = [item["embedding"] for item in user_embeddings]
+        video_vectors = [item["embedding"] for item in video_embeddings]
+        distances = pairwise_euclidean_distances(video_vectors, user_vectors)
+        similarities = pairwise_cosine_similarity(video_vectors, user_vectors)
+
+        for video_index, video_embedding in enumerate(video_embeddings):
+            for user_index, user_embedding in enumerate(user_embeddings):
+                distance = float(distances[video_index, user_index])
+                similarity = float(similarities[video_index, user_index])
+                comparisons.append(
+                    {
+                        "video_embedding_id": video_embedding["video_embedding_id"],
+                        "user_embedding_id": user_embedding["user_embedding_id"],
+                        "distance": distance,
+                        "similarity": similarity,
+                        "is_match_under_threshold": distance <= threshold,
+                    }
+                )
+
+        comparisons.sort(key=lambda item: item["distance"])
+
+    return {
+        "video_id": video_id,
+        "user_embeddings": len(user_embeddings),
+        "video_embeddings": len(video_embeddings),
+        "comparisons": comparisons,
+        "threshold": threshold,
+    }
+
+
+def _build_video_debug_summary(request: Request, *, video_id: str, user_id: str) -> dict[str, Any]:
+    compare_response = _build_compare_response(request, video_id=video_id, user_id=user_id)
+    best_match = compare_response["comparisons"][0] if compare_response["comparisons"] else None
+    return {
+        "user_embeddings_count": compare_response["user_embeddings"],
+        "video_embeddings_count": compare_response["video_embeddings"],
+        "min_distance": None if best_match is None else best_match["distance"],
+        "best_similarity": None if best_match is None else best_match["similarity"],
+        "threshold": compare_response["threshold"],
+    }
 
 
 @router.post("/upload-video")
@@ -117,16 +175,37 @@ def list_videos(
     request: Request,
     current_user: dict = Depends(require_admin),
 ) -> list[dict]:
-    _ = current_user
     media = request.app.state.media_service
     videos = request.app.state.pipeline_store.list_videos()
     return [
         {
             **video,
             "source_video_url": media.get_presigned_url(video.get("s3_path")),
+            **_build_video_debug_summary(
+                request,
+                video_id=video["video_id"],
+                user_id=current_user["user_id"],
+            ),
         }
         for video in videos
     ]
+
+
+@router.get("/debug/compare/{video_id}")
+def debug_compare_video(
+    video_id: str,
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    video = request.app.state.pipeline_store.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return _build_compare_response(
+        request,
+        video_id=video_id,
+        user_id=current_user["user_id"],
+    )
 
 
 @router.post("/videos/{video_id}/process")

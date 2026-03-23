@@ -1,6 +1,10 @@
 import os
 
 
+def _as_bool(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class MatchingConfig:
     def __init__(self):
         self.aws_region = os.environ.get("AWS_REGION", "us-east-1")
@@ -29,6 +33,9 @@ class MatchingConfig:
         )
         self.metrics_log_interval = int(
             os.environ.get("MATCHING_METRICS_LOG_INTERVAL", "25")
+        )
+        self.allow_single_embedding_debug = _as_bool(
+            os.environ.get("ALLOW_SINGLE_EMBEDDING_DEBUG", "false")
         )
 
         if not self.input_sqs_url:

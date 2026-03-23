@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from shared.utils.embeddings import normalize_embedding_vector
 from shared.utils.sqlite_store import SQLiteStore, load_json_records
 
 
@@ -303,6 +304,33 @@ class SQLiteDB:
                 raise
 
         return self.get_user_by_id(user_id)
+
+    def list_user_embeddings(self, user_id: str) -> list[dict[str, Any]]:
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, embedding_json, created_at
+                FROM user_embeddings
+                WHERE user_id = ?
+                ORDER BY id ASC
+                """,
+                (user_id,),
+            ).fetchall()
+
+        embeddings: list[dict[str, Any]] = []
+        for row in rows:
+            normalized = normalize_embedding_vector(json.loads(row["embedding_json"]))
+            if normalized is None:
+                continue
+            embeddings.append(
+                {
+                    "user_embedding_id": str(row["id"]),
+                    "user_id": user_id,
+                    "embedding": normalized.astype(float).tolist(),
+                    "created_at": row["created_at"],
+                }
+            )
+        return embeddings
 
     def list_matches_for_user(self, user_id: str) -> list[dict[str, Any]]:
         with self.store.connection() as conn:

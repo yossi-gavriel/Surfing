@@ -5,29 +5,11 @@ from typing import Any
 
 import numpy as np
 
+from shared.utils.embeddings import normalize_embedding_vector, normalize_embeddings
 from shared.utils.logger import get_logger
 from shared.utils.sqlite_store import SQLiteStore, load_json_records
 
 logger = get_logger("matching-db")
-
-
-def normalize_embeddings(value: Any) -> np.ndarray:
-    array = np.asarray(value, dtype=np.float32)
-    if array.size == 0:
-        return np.empty((0, 0), dtype=np.float32)
-
-    if array.ndim == 1:
-        array = array.reshape(1, -1)
-
-    norms = np.linalg.norm(array, axis=1, keepdims=True)
-    valid_rows = norms[:, 0] > 0
-    array = array[valid_rows]
-    norms = norms[valid_rows]
-
-    if array.size == 0:
-        return np.empty((0, 0), dtype=np.float32)
-
-    return array / norms
 
 
 class UsersDB:
@@ -126,6 +108,7 @@ class UsersDB:
                 """
                 SELECT
                     u.user_id,
+                    ue.id AS embedding_id,
                     ue.embedding_json
                 FROM users u
                 LEFT JOIN user_embeddings ue ON ue.user_id = u.user_id
@@ -133,22 +116,36 @@ class UsersDB:
                 """
             ).fetchall()
 
-        grouped: dict[str, list[Any]] = {}
+        grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             user_id = row["user_id"]
             grouped.setdefault(user_id, [])
             if row["embedding_json"] is not None:
-                grouped[user_id].append(json.loads(row["embedding_json"]))
+                grouped[user_id].append(
+                    {
+                        "embedding_id": str(row["embedding_id"]),
+                        "embedding": json.loads(row["embedding_json"]),
+                    }
+                )
 
         loaded_users: list[dict[str, Any]] = []
-        for user_id, raw_embeddings in grouped.items():
-            if not raw_embeddings:
+        for user_id, raw_records in grouped.items():
+            if not raw_records:
                 continue
 
-            embeddings = normalize_embeddings(raw_embeddings)
-            if embeddings.size == 0:
+            embedding_ids: list[str] = []
+            normalized_rows: list[np.ndarray] = []
+            for record in raw_records:
+                normalized = normalize_embedding_vector(record["embedding"])
+                if normalized is None:
+                    continue
+                embedding_ids.append(record["embedding_id"])
+                normalized_rows.append(normalized)
+
+            if not normalized_rows:
                 continue
 
+            embeddings = np.vstack(normalized_rows).astype(np.float32)
             avg_embedding = normalize_embeddings(np.mean(embeddings, axis=0))
             if avg_embedding.size == 0:
                 continue
@@ -157,6 +154,7 @@ class UsersDB:
                 {
                     "user_id": user_id,
                     "embeddings": embeddings,
+                    "embedding_ids": embedding_ids,
                     "avg_embedding": avg_embedding[0],
                 }
             )

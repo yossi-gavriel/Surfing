@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from scipy.spatial.distance import cdist
 
+from shared.utils.embeddings import pairwise_euclidean_distances
 from shared.utils.logger import get_logger
 from src.config import MatchingConfig
 from src.db import UsersDB, normalize_embeddings
@@ -37,6 +37,7 @@ class MatchResult:
 @dataclass
 class CandidateScore:
     user_id: str
+    best_user_embedding_id: str | None
     aggregated_distance: float
     mean_distance: float
     max_distance: float
@@ -63,11 +64,20 @@ class Matcher:
 
         evidence_count = self._get_track_evidence_count(payload, track_embeddings)
         payload_consistency = self._get_payload_consistency(payload)
-        self._validate_track_evidence(
+        validation_error = self._get_track_evidence_validation_error(
             evidence_count=evidence_count,
             track_embeddings=track_embeddings,
             payload_consistency=payload_consistency,
         )
+        if validation_error is not None:
+            self._log_single_embedding_debug(
+                payload=payload,
+                users=users,
+                track_embeddings=track_embeddings,
+                evidence_count=evidence_count,
+                payload_consistency=payload_consistency,
+            )
+            raise ValueError(validation_error)
 
         track_embedding = self._aggregate_track_embeddings(track_embeddings)
         ranked_candidates = self._rank_candidates(
@@ -101,6 +111,19 @@ class Matcher:
         )
 
         if not decision:
+            self._print_rejected_match(
+                payload=payload,
+                candidate=best_candidate,
+            )
+            if rejection_reason == "consistency":
+                self._log_single_embedding_debug(
+                    payload=payload,
+                    users=users,
+                    track_embeddings=track_embeddings,
+                    evidence_count=evidence_count,
+                    payload_consistency=payload_consistency,
+                    ranked_candidates=ranked_candidates,
+                )
             logger.info(
                 "Rejected track_id=%s user_id=%s "
                 "(distance=%.4f mean=%.4f max=%.4f std=%.4f score=%.4f embeddings_used=%d evidence_count=%d payload_consistency=%s)",
@@ -176,24 +199,26 @@ class Matcher:
         except (TypeError, ValueError):
             return None
 
-    def _validate_track_evidence(
+    def _get_track_evidence_validation_error(
         self,
         evidence_count: int,
         track_embeddings: np.ndarray,
         payload_consistency: float | None,
-    ) -> None:
+    ) -> str | None:
         if len(track_embeddings) >= self.config.min_track_embeddings:
-            return
+            return None
 
         if evidence_count >= self.config.min_track_embeddings:
             if payload_consistency is None:
-                raise ValueError("track has aggregated embedding without consistency metadata")
+                return "track has aggregated embedding without consistency metadata"
             if payload_consistency < self.config.min_track_consistency:
-                raise ValueError("track consistency below minimum threshold")
-            return
+                return "track consistency below minimum threshold"
+            return None
 
         if len(track_embeddings) < 2:
-            raise ValueError("single-embedding tracks are not eligible for matching")
+            return "single-embedding tracks are not eligible for matching"
+
+        return None
 
     def _aggregate_track_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
         aggregated = np.mean(embeddings, axis=0)
@@ -236,14 +261,16 @@ class Matcher:
         evidence_count: int,
         payload_consistency: float | None,
     ) -> CandidateScore:
-        aggregated_distance = float(
-            cdist(user["embeddings"], track_embedding, metric="euclidean").min()
-        )
+        aggregated_distances = pairwise_euclidean_distances(user["embeddings"], track_embedding)
+        aggregated_distance_index = int(np.argmin(aggregated_distances))
+        aggregated_distance = float(aggregated_distances.reshape(-1)[aggregated_distance_index])
+        best_user_embedding_id = None
+        if user.get("embedding_ids"):
+            best_user_embedding_id = user["embedding_ids"][aggregated_distance_index]
 
-        per_embedding_distances = cdist(
+        per_embedding_distances = pairwise_euclidean_distances(
             track_embeddings,
             user["embeddings"],
-            metric="euclidean",
         ).min(axis=1)
 
         mean_distance = float(np.mean(per_embedding_distances))
@@ -255,6 +282,7 @@ class Matcher:
             track_embeddings=track_embeddings,
             candidate_score=CandidateScore(
                 user_id=user["user_id"],
+                best_user_embedding_id=best_user_embedding_id,
                 aggregated_distance=aggregated_distance,
                 mean_distance=mean_distance,
                 max_distance=max_distance,
@@ -269,6 +297,7 @@ class Matcher:
 
         return CandidateScore(
             user_id=user["user_id"],
+            best_user_embedding_id=best_user_embedding_id,
             aggregated_distance=aggregated_distance,
             mean_distance=mean_distance,
             max_distance=max_distance,
@@ -327,6 +356,63 @@ class Matcher:
         if second_best_candidate is not None and score_margin is not None and score_margin < self.config.margin:
             return False, "margin"
         return True, None
+
+    def _print_rejected_match(
+        self,
+        *,
+        payload: dict[str, Any],
+        candidate: CandidateScore,
+    ) -> None:
+        print(
+            {
+                "video_embedding_id": payload.get("video_embedding_id") or payload.get("track_id"),
+                "user_embedding_id": candidate.best_user_embedding_id,
+                "distance": candidate.aggregated_distance,
+                "threshold": self.config.match_threshold,
+                "decision": "rejected",
+            }
+        )
+
+    def _log_single_embedding_debug(
+        self,
+        *,
+        payload: dict[str, Any],
+        users: list[dict[str, Any]],
+        track_embeddings: np.ndarray,
+        evidence_count: int,
+        payload_consistency: float | None,
+        ranked_candidates: list[CandidateScore] | None = None,
+    ) -> None:
+        if not self.config.allow_single_embedding_debug or len(track_embeddings) != 1 or not users:
+            return
+
+        if ranked_candidates is None:
+            track_embedding = self._aggregate_track_embeddings(track_embeddings)
+            ranked_candidates = self._rank_candidates(
+                users=users,
+                track_embedding=track_embedding,
+                track_embeddings=track_embeddings,
+                evidence_count=evidence_count,
+                payload_consistency=payload_consistency,
+            )
+
+        if not ranked_candidates:
+            return
+
+        best_candidate = ranked_candidates[0]
+        second_best_candidate = ranked_candidates[1] if len(ranked_candidates) > 1 else None
+        score_margin = self._get_score_margin(best_candidate, second_best_candidate)
+        would_match = (
+            best_candidate.aggregated_distance <= self.config.match_threshold
+            and best_candidate.final_score >= self.config.min_score
+            and (
+                second_best_candidate is None
+                or score_margin is None
+                or score_margin >= self.config.margin
+            )
+        )
+        if would_match:
+            print("Would have matched if single embedding was allowed")
 
     def _get_video_id(self, payload: dict[str, Any]) -> str | None:
         return payload.get("video_id") or payload.get("source_video_id")
