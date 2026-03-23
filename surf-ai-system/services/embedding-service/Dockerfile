@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app/services/embedding-service
 
 COPY shared/ /app/shared/
 COPY services/embedding-service/requirements.txt /app/services/embedding-service/

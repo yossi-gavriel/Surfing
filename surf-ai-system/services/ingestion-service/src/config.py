@@ -8,6 +8,8 @@ class IngestionConfig:
         self.s3_bucket = os.environ.get("S3_BUCKET")
         self.sqs_queue_url = os.environ.get("SQS_QUEUE_URL")
         self.chunk_duration = int(os.environ.get("CHUNK_DURATION", "10"))
+        self.sqlite_db_path = os.environ.get("SQLITE_DB_PATH", "/app/data/surf_ai.db")
+        self.camera_poll_interval = int(os.environ.get("CAMERA_POLL_INTERVAL", "10"))
         
         if not self.s3_bucket:
             raise ValueError("S3_BUCKET environment variable is required")
@@ -34,7 +36,7 @@ class IngestionConfig:
                 data = json.load(f)
                 return data.get("cameras", [])
         except FileNotFoundError:
-            raise ValueError(f"Cameras config file not found at {config_path}")
+            return []
         except json.JSONDecodeError:
             raise ValueError(f"Cameras config file at {config_path} is invalid JSON")
 

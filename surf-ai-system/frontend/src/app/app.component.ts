@@ -14,6 +14,7 @@ import { AuthService } from './core/auth.service';
         <a routerLink="/my-videos" class="brand">Surf AI</a>
 
         <nav *ngIf="auth.isAuthenticated()">
+          <a routerLink="/admin" routerLinkActive="active">Admin</a>
           <a routerLink="/upload-face" routerLinkActive="active">Upload Face</a>
           <a routerLink="/my-videos" routerLinkActive="active">My Videos</a>
           <button type="button" (click)="logout()">Log out</button>

@@ -47,6 +47,20 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def is_admin_email(email: str) -> bool:
+    configured = os.environ.get("ADMIN_EMAILS", "").strip()
+    if not configured:
+        return True
+
+    normalized_email = normalize_email(email)
+    allowed = {
+        normalize_email(item)
+        for item in configured.split(",")
+        if item.strip()
+    }
+    return normalized_email in allowed
+
+
 def hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
     salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
     password_hash = hashlib.pbkdf2_hmac(

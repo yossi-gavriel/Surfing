@@ -23,6 +23,16 @@ def download_video(s3_key: str, local_path: str) -> bool:
         logger.error(f"Retrieval sequence broke structurally explicitly: {e}")
         return False
 
+def download_s3_path(s3_path: str, local_path: str) -> bool:
+    try:
+        bucket = s3_path.split('//', 1)[1].split('/', 1)[0]
+        key = s3_path.split(bucket + '/', 1)[1]
+        s3_client.download_file(bucket, key, local_path)
+        return True
+    except Exception as e:
+        logger.error(f"Direct source video download failed: {e}")
+        return False
+
 def find_s3_chunk(camera_id, start_dt, bucket):
     for offset_hours in [0, 1]:
         dt_check = start_dt - timedelta(hours=offset_hours)
@@ -71,6 +81,7 @@ def process_clip(msg_body: dict, clipper: VideoClipper):
     camera_id = msg_body.get("camera_id")
     start_time_iso = msg_body.get("start_time")
     end_time_iso = msg_body.get("end_time")
+    source_video_s3 = msg_body.get("source_video_s3")
     
     if not track_id or not camera_id or not start_time_iso or not end_time_iso:
         raise ValueError(f"Envelope bounds fundamentally compromised completely avoiding operation arrays constraints: {msg_body}")
@@ -82,21 +93,29 @@ def process_clip(msg_body: dict, clipper: VideoClipper):
         logger.error(f"[{track_id}] Timestamp validation structure rigorously failed ISO specifications exactly: {e}")
         return
 
-    s3_key, chunk_dt = find_s3_chunk(camera_id, start_dt, config.s3_bucket)
-    if not s3_key:
-        logger.error(f"[{track_id}] Exact topological physical source file mapped transparently empty logically over AWS architectures.")
-        # Generates explicit failure throwing straight back enabling logical native AWS SQS visibility timeouts retrying structurally
-        raise Exception("Root video dependencies organically absent rigorously preventing truncations safely natively.")
-
-    offset_start = max(0.0, (start_dt - chunk_dt).total_seconds())
-    offset_end = (end_dt - chunk_dt).total_seconds()
-    
-    local_input = f"/tmp/{camera_id}_{track_id}_input.ts"
+    local_input = f"/tmp/{camera_id or 'video'}_{track_id}_input.ts"
     local_output = f"/tmp/{camera_id}_{track_id}_clip.mp4"
     
     try:
-        if not download_video(s3_key, local_input):
-            raise Exception("Base stream mapping physically threw extraction warnings definitively.")
+        if camera_id:
+            s3_key, chunk_dt = find_s3_chunk(camera_id, start_dt, config.s3_bucket)
+            if not s3_key:
+                logger.error(f"[{track_id}] Exact topological physical source file mapped transparently empty logically over AWS architectures.")
+                raise Exception("Root video dependencies organically absent rigorously preventing truncations safely natively.")
+
+            offset_start = max(0.0, (start_dt - chunk_dt).total_seconds())
+            offset_end = (end_dt - chunk_dt).total_seconds()
+            if not download_video(s3_key, local_input):
+                raise Exception("Base stream mapping physically threw extraction warnings definitively.")
+        else:
+            if not source_video_s3:
+                raise Exception("Source video is required when camera_id is unavailable.")
+            offset_start = 0.0
+            offset_end = max(3.0, min(15.0, (end_dt - start_dt).total_seconds() + 2.0))
+            local_input = f"/tmp/video_{track_id}_input.mp4"
+            local_output = f"/tmp/video_{track_id}_clip.mp4"
+            if not download_s3_path(source_video_s3, local_input):
+                raise Exception("Failed to download direct source video.")
             
         if not clipper.clip_video(local_input, local_output, offset_start, offset_end):
             raise Exception("FFMPEG execution pipeline mapping securely explicitly trapped boundaries securely.")

@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app/services/clipper-service
 
 COPY shared/ /app/shared/
 COPY services/clipper-service/requirements.txt /app/services/clipper-service/

@@ -14,6 +14,25 @@ class MediaService:
         )
         self._cache: dict[str, dict[str, Any]] = {}
 
+    def upload_bytes(
+        self,
+        *,
+        data: bytes,
+        key: str,
+        content_type: str | None = None,
+    ) -> str:
+        extra_args: dict[str, str] = {}
+        if content_type:
+            extra_args["ContentType"] = content_type
+
+        self.client.put_object(
+            Bucket=self.default_bucket,
+            Key=key,
+            Body=data,
+            **extra_args,
+        )
+        return f"s3://{self.default_bucket}/{key}"
+
     def get_presigned_url(
         self,
         s3_path: str | None = None,
