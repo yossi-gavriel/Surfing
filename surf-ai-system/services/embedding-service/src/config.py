@@ -15,6 +15,7 @@ class EmbeddingConfig:
         self.max_pitch = float(os.environ.get("MAX_PITCH", "30.0"))
         self.max_similarity = float(os.environ.get("MAX_SIMILARITY", "0.95"))
         self.min_samples = int(os.environ.get("MIN_SAMPLES", "2"))
+        self.matching_min_track_embeddings = int(os.environ.get("MIN_TRACK_EMBEDDINGS", "3"))
         
         self.model_name = os.environ.get("INSIGHTFACE_MODEL", "buffalo_s")
         self.ctx_id = int(os.environ.get("INSIGHTFACE_CTX", "-1"))

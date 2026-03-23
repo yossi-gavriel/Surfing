@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ class PipelineStore:
                     status TEXT NOT NULL,
                     source_type TEXT NOT NULL DEFAULT 'video',
                     camera_id TEXT,
+                    diagnostics_json TEXT,
                     error_message TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -45,6 +47,7 @@ class PipelineStore:
                 ON videos(status)
                 """
             )
+            self._ensure_column(conn, "videos", "diagnostics_json", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cameras (
@@ -81,6 +84,7 @@ class PipelineStore:
             "status": normalized_status,
             "source_type": source_type,
             "camera_id": camera_id,
+            "diagnostics": {},
             "error_message": None,
             "created_at": now,
             "updated_at": now,
@@ -89,8 +93,8 @@ class PipelineStore:
             conn.execute(
                 """
                 INSERT INTO videos (
-                    video_id, s3_path, status, source_type, camera_id, error_message, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    video_id, s3_path, status, source_type, camera_id, diagnostics_json, error_message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["video_id"],
@@ -98,6 +102,7 @@ class PipelineStore:
                     record["status"],
                     record["source_type"],
                     record["camera_id"],
+                    json.dumps(record["diagnostics"]),
                     record["error_message"],
                     record["created_at"],
                     record["updated_at"],
@@ -109,26 +114,26 @@ class PipelineStore:
         with self.store.connection() as conn:
             row = conn.execute(
                 """
-                SELECT video_id, s3_path, status, source_type, camera_id, error_message, created_at, updated_at
+                SELECT video_id, s3_path, status, source_type, camera_id, diagnostics_json, error_message, created_at, updated_at
                 FROM videos
                 WHERE video_id = ?
                 """,
                 (video_id,),
             ).fetchone()
-        return dict(row) if row else None
+        return self._video_from_row(row) if row else None
 
     def list_videos(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.store.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT video_id, s3_path, status, source_type, camera_id, error_message, created_at, updated_at
+                SELECT video_id, s3_path, status, source_type, camera_id, diagnostics_json, error_message, created_at, updated_at
                 FROM videos
                 ORDER BY datetime(created_at) DESC, video_id DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._video_from_row(row) for row in rows]
 
     def update_video_status(
         self,
@@ -149,6 +154,35 @@ class PipelineStore:
                 (normalized_status, error_message, updated_at, video_id),
             )
         return self.get_video(video_id)
+
+    def set_video_diagnostics(
+        self,
+        video_id: str,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self.store.connection() as conn:
+            conn.execute(
+                """
+                UPDATE videos
+                SET diagnostics_json = ?, updated_at = ?
+                WHERE video_id = ?
+                """,
+                (json.dumps(diagnostics), updated_at, video_id),
+            )
+        return self.get_video(video_id)
+
+    def update_video_diagnostics(
+        self,
+        video_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        existing = self.get_video(video_id)
+        if not existing:
+            return None
+        diagnostics = existing.get("diagnostics") or {}
+        merged = self._deep_merge_dicts(diagnostics, patch)
+        return self.set_video_diagnostics(video_id, merged)
 
     def upsert_camera(
         self,
@@ -230,6 +264,44 @@ class PipelineStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _video_from_row(self, row) -> dict[str, Any]:
+        diagnostics: dict[str, Any] = {}
+        raw_diagnostics = row["diagnostics_json"]
+        if raw_diagnostics:
+            try:
+                diagnostics = json.loads(raw_diagnostics)
+            except json.JSONDecodeError:
+                diagnostics = {}
+
+        return {
+            "video_id": row["video_id"],
+            "s3_path": row["s3_path"],
+            "status": row["status"],
+            "source_type": row["source_type"],
+            "camera_id": row["camera_id"],
+            "diagnostics": diagnostics,
+            "error_message": row["error_message"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _ensure_column(self, conn, table_name: str, column_name: str, column_definition: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if column_name not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+            )
+
+    def _deep_merge_dicts(self, base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._deep_merge_dicts(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
 
     def _normalize_status(self, status: str) -> str:
         normalized = (status or "").strip().lower()

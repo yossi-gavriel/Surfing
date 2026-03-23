@@ -11,6 +11,24 @@ interface AdminVideo {
   s3_path: string;
   status: 'uploaded' | 'processing' | 'completed' | 'failed';
   error_message: string | null;
+  diagnostics?: {
+    frame_processor?: {
+      sampled_frames?: number;
+      detections?: number;
+      tracks_seen?: number;
+      output_tracks?: number;
+      keyframes_uploaded?: number;
+      processing_seconds?: number;
+    };
+    embedding_service?: {
+      tracks_received?: number;
+      tracks_with_embeddings?: number;
+      tracks_without_faces?: number;
+      tracks_below_matching_threshold?: number;
+      valid_faces_detected?: number;
+      last_confidence?: number;
+    };
+  };
   created_at: string;
   updated_at: string;
   source_video_url: string | null;
@@ -106,6 +124,15 @@ interface CameraRecord {
               <span>{{ formatTimestamp(video.created_at) }}</span>
               <a *ngIf="video.source_video_url" [href]="video.source_video_url" target="_blank" rel="noopener">Open source</a>
               <small *ngIf="video.error_message">{{ video.error_message }}</small>
+              <div class="metrics" *ngIf="video.diagnostics">
+                <span *ngIf="video.diagnostics.frame_processor?.sampled_frames">Frames {{ video.diagnostics.frame_processor?.sampled_frames }}</span>
+                <span *ngIf="video.diagnostics.frame_processor?.detections !== undefined">Detections {{ video.diagnostics.frame_processor?.detections }}</span>
+                <span *ngIf="video.diagnostics.frame_processor?.output_tracks !== undefined">Tracks {{ video.diagnostics.frame_processor?.output_tracks }}</span>
+                <span *ngIf="video.diagnostics.embedding_service?.tracks_with_embeddings !== undefined">Embedded tracks {{ video.diagnostics.embedding_service?.tracks_with_embeddings }}</span>
+                <span *ngIf="video.diagnostics.embedding_service?.tracks_without_faces !== undefined">No-face tracks {{ video.diagnostics.embedding_service?.tracks_without_faces }}</span>
+                <span *ngIf="video.diagnostics.embedding_service?.tracks_below_matching_threshold !== undefined">Below match threshold {{ video.diagnostics.embedding_service?.tracks_below_matching_threshold }}</span>
+              </div>
+              <small class="hint" *ngIf="matchingHint(video)">{{ matchingHint(video) }}</small>
             </div>
 
             <div class="video-meta">
@@ -317,6 +344,21 @@ interface CameraRecord {
       min-width: 0;
     }
 
+    .metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.4rem;
+    }
+
+    .metrics span {
+      border-radius: 999px;
+      background: rgba(20, 82, 96, 0.08);
+      color: var(--ink-soft);
+      padding: 0.28rem 0.6rem;
+      font-size: 0.78rem;
+    }
+
     .video-copy strong,
     .camera-row strong {
       overflow-wrap: anywhere;
@@ -325,6 +367,12 @@ interface CameraRecord {
     .video-copy a {
       color: var(--accent-deep);
       text-decoration: none;
+    }
+
+    .hint {
+      margin-top: 0.35rem;
+      color: #8a5c13;
+      line-height: 1.5;
     }
 
     .status {
@@ -559,6 +607,28 @@ export class AdminComponent {
   formatTimestamp(value: string): string {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  matchingHint(video: AdminVideo): string {
+    const diagnostics = video.diagnostics;
+    const outputTracks = diagnostics?.frame_processor?.output_tracks ?? 0;
+    const embeddedTracks = diagnostics?.embedding_service?.tracks_with_embeddings ?? 0;
+    const belowThreshold = diagnostics?.embedding_service?.tracks_below_matching_threshold ?? 0;
+    const noFaceTracks = diagnostics?.embedding_service?.tracks_without_faces ?? 0;
+
+    if (video.status !== 'completed') {
+      return '';
+    }
+    if (outputTracks === 0) {
+      return 'The frame processor completed, but it did not produce any qualifying tracks.';
+    }
+    if (embeddedTracks === 0 && noFaceTracks > 0) {
+      return 'Tracks were created, but the face embedder could not extract a usable face from the keyframes.';
+    }
+    if (belowThreshold > 0) {
+      return 'At least one track had too little face evidence for matching, so no match could be created.';
+    }
+    return '';
   }
 
   private handleHttpError(error: any, fallbackMessage: string): void {

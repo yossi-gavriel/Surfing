@@ -82,6 +82,28 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
     source = source_context(msg_body)
     if source["source_type"] == "video":
         update_video_status(source["video_id"], "processing")
+        if pipeline_store and source["video_id"]:
+            pipeline_store.set_video_diagnostics(
+                source["video_id"],
+                {
+                    "frame_processor": {
+                        "started_at": datetime.utcnow().isoformat(),
+                        "source_video": source["s3_path"],
+                        "sampled_frames": 0,
+                        "detections": 0,
+                        "tracks_seen": 0,
+                        "output_tracks": 0,
+                        "keyframes_uploaded": 0,
+                    },
+                    "embedding_service": {
+                        "tracks_received": 0,
+                        "tracks_with_embeddings": 0,
+                        "tracks_without_faces": 0,
+                        "tracks_below_matching_threshold": 0,
+                        "valid_faces_detected": 0,
+                    },
+                },
+            )
 
     local_path = f"/tmp/{source['filename']}"
     download_video(source["s3_path"], local_path)
@@ -114,10 +136,12 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
 
     tracks_history: dict[Any, dict[str, Any]] = {}
     total_detections = 0
+    sampled_frames = 0
     frame_width = None
     zone_calc = None
 
     for frame_idx, timestamp_sec, frame in extract_frames(local_path, config.frame_sample_rate):
+        sampled_frames += 1
         if frame_width is None:
             frame_width = frame.shape[1]
             zone_calc = ZoneCalculator(frame_width)
@@ -184,6 +208,7 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
     tracker.save_state()
 
     valid_tracks_count = 0
+    uploaded_keyframes = 0
     for tid, data in tracks_history.items():
         if len(data["frames"]) < config.min_track_length:
             continue
@@ -215,6 +240,7 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
             keyframe_s3 = f"keyframes/{source['storage_key']}/{keyframe_name}"
             s3_client.upload_file(keyframe_local, config.s3_bucket, keyframe_s3)
             data["keyframe_s3"] = f"s3://{config.s3_bucket}/{keyframe_s3}"
+            uploaded_keyframes += 1
             if os.path.exists(keyframe_local):
                 os.remove(keyframe_local)
 
@@ -234,6 +260,21 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
         valid_tracks_count,
     )
     if source["source_type"] == "video":
+        if pipeline_store and source["video_id"]:
+            pipeline_store.update_video_diagnostics(
+                source["video_id"],
+                {
+                    "frame_processor": {
+                        "completed_at": datetime.utcnow().isoformat(),
+                        "processing_seconds": round(processing_time, 2),
+                        "sampled_frames": sampled_frames,
+                        "detections": total_detections,
+                        "tracks_seen": len(tracks_history),
+                        "output_tracks": valid_tracks_count,
+                        "keyframes_uploaded": uploaded_keyframes,
+                    }
+                },
+            )
         update_video_status(source["video_id"], "completed")
 
 

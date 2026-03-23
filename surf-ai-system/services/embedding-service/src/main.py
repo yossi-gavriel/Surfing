@@ -4,6 +4,7 @@ import time
 import boto3
 import sys
 import cv2
+from datetime import datetime
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
@@ -12,10 +13,12 @@ from src.face_detector import FaceDetector
 from src.embedder import FaceEmbedder
 from src.aggregator import EmbeddingAggregator
 from shared.utils.logger import get_logger
+from shared.utils.pipeline_store import PipelineStore
 
 logger = get_logger("embedding-service")
 sqs_client = boto3.client('sqs', region_name=config.aws_region)
 s3_client = boto3.client('s3', region_name=config.aws_region)
+pipeline_store = PipelineStore(os.environ.get("SQLITE_DB_PATH", "/app/data/surf_ai.db"))
 
 def download_image(s3_path: str, local_path: str) -> bool:
     bucket = s3_path.split('//')[1].split('/')[0]
@@ -32,9 +35,49 @@ def compute_quality_score(det_score, face_size, blur_score):
     blur_weight = min(blur_score / 500.0, 1.0)
     return float(det_score * size_weight * blur_weight)
 
+
+def update_video_embedding_diagnostics(
+    video_id: str | None,
+    *,
+    tracks_received_increment: int = 0,
+    tracks_with_embeddings_increment: int = 0,
+    tracks_without_faces_increment: int = 0,
+    tracks_below_matching_threshold_increment: int = 0,
+    valid_faces_detected_increment: int = 0,
+    last_track_id: str | None = None,
+    last_confidence: float | None = None,
+):
+    if not video_id:
+        return
+
+    existing = pipeline_store.get_video(video_id)
+    if not existing:
+        return
+
+    embedding_data = (existing.get("diagnostics") or {}).get("embedding_service") or {}
+    patch = {
+        "embedding_service": {
+            "tracks_received": int(embedding_data.get("tracks_received", 0)) + tracks_received_increment,
+            "tracks_with_embeddings": int(embedding_data.get("tracks_with_embeddings", 0)) + tracks_with_embeddings_increment,
+            "tracks_without_faces": int(embedding_data.get("tracks_without_faces", 0)) + tracks_without_faces_increment,
+            "tracks_below_matching_threshold": int(embedding_data.get("tracks_below_matching_threshold", 0)) + tracks_below_matching_threshold_increment,
+            "valid_faces_detected": int(embedding_data.get("valid_faces_detected", 0)) + valid_faces_detected_increment,
+            "last_track_id": last_track_id or embedding_data.get("last_track_id"),
+            "last_confidence": last_confidence if last_confidence is not None else embedding_data.get("last_confidence"),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    }
+    pipeline_store.update_video_diagnostics(video_id, patch)
+
 def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder, aggregator: EmbeddingAggregator):
     track_id = msg_body.get("track_id")
     camera_id = msg_body.get("camera_id")
+    video_id = msg_body.get("video_id") or msg_body.get("source_video_id")
+    update_video_embedding_diagnostics(
+        video_id,
+        tracks_received_increment=1,
+        last_track_id=track_id,
+    )
     
     keyframes = msg_body.get("keyframes", [])
     if "keyframe_s3" in msg_body and msg_body["keyframe_s3"]:
@@ -105,7 +148,22 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
     
     if agg_emb is None:
         logger.warning(f"[{track_id}] Aggregate explicitly canceled mapped to 0 logical faces across keyframes.")
+        update_video_embedding_diagnostics(
+            video_id,
+            tracks_without_faces_increment=1,
+            last_track_id=track_id,
+        )
         return
+
+    below_threshold = 1 if num_faces < config.matching_min_track_embeddings else 0
+    update_video_embedding_diagnostics(
+        video_id,
+        tracks_with_embeddings_increment=1,
+        tracks_below_matching_threshold_increment=below_threshold,
+        valid_faces_detected_increment=num_faces,
+        last_track_id=track_id,
+        last_confidence=float(final_conf),
+    )
         
     output_data = {
         "track_id": track_id,
