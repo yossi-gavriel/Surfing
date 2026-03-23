@@ -37,6 +37,8 @@ services:
     container_name: embedding-service
     env_file:
       - ../.env
+    volumes:
+      - db-data:/app/data
     restart: always
 
   matching-service:
