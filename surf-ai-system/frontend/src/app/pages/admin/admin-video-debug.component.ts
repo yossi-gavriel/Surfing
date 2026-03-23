@@ -12,14 +12,26 @@ interface DebugReferenceImage {
 }
 
 interface DebugVideoFrame {
-  video_embedding_id: string;
+  debug_frame_id?: string;
+  video_embedding_id?: string;
   track_id: string;
-  keyframe_s3: string | null;
-  keyframe_url: string | null;
-  start_time: string | null;
-  end_time: string | null;
-  best_user_embedding_id: string | null;
-  best_reference_image_url: string | null;
+  frame_index?: number;
+  frame_timestamp?: string | null;
+  image_url?: string | null;
+  keyframe_s3?: string | null;
+  keyframe_url?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  best_user_embedding_id?: string | null;
+  best_reference_image_url?: string | null;
+  bbox?: number[] | null;
+  face_bbox?: number[] | null;
+  has_face?: boolean;
+  used_for_embedding?: boolean;
+  is_valid?: boolean;
+  hasFaceLabel?: string;
+  validLabel?: string;
+  usedLabel?: string;
   distance: number | null;
   similarity: number | null;
   is_match_under_threshold: boolean;
@@ -34,6 +46,14 @@ interface DebugCompareResponse {
   best_reference_image_url: string | null;
   reference_images: DebugReferenceImage[];
   video_frames: DebugVideoFrame[];
+  debug_frames: DebugVideoFrame[];
+  summary: {
+    total_frames: number;
+    valid_frames: number;
+    best_similarity: number | null;
+    best_distance: number | null;
+    force_match: boolean;
+  };
 }
 
 @Component({
@@ -70,6 +90,8 @@ interface DebugCompareResponse {
             <span class="pill">User embeddings {{ debug.user_embeddings }}</span>
             <span class="pill">Video embeddings {{ debug.video_embeddings }}</span>
             <span class="pill">Threshold {{ formatMetric(debug.threshold) }}</span>
+            <span class="pill">Frames {{ debug.summary.total_frames }}</span>
+            <span class="pill">Valid {{ debug.summary.valid_frames }}</span>
           </div>
         </div>
 
@@ -89,25 +111,31 @@ interface DebugCompareResponse {
         <div class="panel-header">
           <div>
             <p class="panel-label">Video frames</p>
-            <h3>Best match per stored keyframe</h3>
+            <h3>All stored debug frames</h3>
           </div>
         </div>
 
-        <div class="empty" *ngIf="debug.video_frames.length === 0">
-          No stored video embeddings were found for this video yet.
+        <div class="summary-row">
+          <span class="pill">Best similarity {{ formatNullableMetric(debug.summary.best_similarity) }}</span>
+          <span class="pill">Best distance {{ formatNullableMetric(debug.summary.best_distance) }}</span>
+          <span class="pill" [class.force]="debug.summary.force_match">Force match {{ debug.summary.force_match ? 'yes' : 'no' }}</span>
         </div>
 
-        <div class="frames-grid" *ngIf="debug.video_frames.length > 0">
-          <article class="frame-card" *ngFor="let frame of debug.video_frames">
-            <img *ngIf="frame.keyframe_url; else noFrameImage" [src]="frame.keyframe_url" alt="Video keyframe" class="frame-image" />
+        <div class="empty" *ngIf="debug.debug_frames.length === 0">
+          No stored debug frames were found for this video yet.
+        </div>
+
+        <div class="frames-grid" *ngIf="debug.debug_frames.length > 0">
+          <article class="frame-card" *ngFor="let frame of debug.debug_frames" [class.used]="frame.used_for_embedding">
+            <img *ngIf="frame.image_url || frame.keyframe_url; else noFrameImage" [src]="frame.image_url || frame.keyframe_url || ''" alt="Video frame" class="frame-image" />
 
             <ng-template #noFrameImage>
-              <div class="placeholder frame-placeholder">No keyframe image available</div>
+              <div class="placeholder frame-placeholder">No frame image available</div>
             </ng-template>
 
             <div class="frame-body">
               <div class="frame-meta">
-                <strong>{{ frame.track_id }}</strong>
+                <strong>{{ frame.track_id }} / #{{ frame.frame_index ?? 0 }}</strong>
                 <span class="status" [class.matched]="frame.is_match_under_threshold" [class.unmatched]="!frame.is_match_under_threshold">
                   {{ frame.is_match_under_threshold ? 'under threshold' : 'over threshold' }}
                 </span>
@@ -116,10 +144,21 @@ interface DebugCompareResponse {
               <div class="metrics">
                 <span>Distance {{ formatNullableMetric(frame.distance) }}</span>
                 <span>Similarity {{ formatNullableMetric(frame.similarity) }}</span>
+                <span>Has face {{ frame.hasFaceLabel }}</span>
+                <span>Valid {{ frame.validLabel }}</span>
+                <span>Used {{ frame.usedLabel }}</span>
               </div>
 
-              <small class="time" *ngIf="frame.start_time || frame.end_time">
-                {{ formatRange(frame.start_time, frame.end_time) }}
+              <small class="time" *ngIf="frame.frame_timestamp || frame.start_time || frame.end_time">
+                {{ frame.frame_timestamp ? formatTimestamp(frame.frame_timestamp) : formatRange(frame.start_time ?? null, frame.end_time ?? null) }}
+              </small>
+
+              <small class="time" *ngIf="frame.face_bbox?.length">
+                Face bbox {{ formatBbox(frame.face_bbox || null) }}
+              </small>
+
+              <small class="time" *ngIf="frame.bbox?.length">
+                Track bbox {{ formatBbox(frame.bbox || null) }}
               </small>
             </div>
           </article>
@@ -255,11 +294,23 @@ interface DebugCompareResponse {
       margin-top: 1rem;
     }
 
+    .summary-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 1rem;
+    }
+
     .frame-card {
       overflow: hidden;
       border-radius: 24px;
       background: rgba(255, 255, 255, 0.8);
       border: 1px solid rgba(20, 60, 68, 0.08);
+    }
+
+    .frame-card.used {
+      border-color: rgba(29, 109, 79, 0.4);
+      box-shadow: inset 0 0 0 1px rgba(29, 109, 79, 0.2);
     }
 
     .frame-image,
@@ -298,6 +349,11 @@ interface DebugCompareResponse {
     }
 
     .status.unmatched {
+      background: rgba(167, 52, 27, 0.12);
+      color: #a7341b;
+    }
+
+    .pill.force {
       background: rgba(167, 52, 27, 0.12);
       color: #a7341b;
     }
@@ -373,7 +429,16 @@ export class AdminVideoDebugComponent {
       })
       .subscribe({
         next: (response) => {
-          this.debugData.set(response);
+          const mappedDebugFrames = response.debug_frames.map((frame) => ({
+            ...frame,
+            hasFaceLabel: frame.has_face ? 'yes' : 'no',
+            validLabel: frame.is_valid ? 'yes' : 'no',
+            usedLabel: frame.used_for_embedding ? 'yes' : 'no',
+          }));
+          this.debugData.set({
+            ...response,
+            debug_frames: mappedDebugFrames,
+          });
           this.loading.set(false);
         },
         error: (error) => {
@@ -406,8 +471,15 @@ export class AdminVideoDebugComponent {
     return `${startLabel} - ${endLabel}`;
   }
 
-  private formatTimestamp(value: string): string {
+  formatTimestamp(value: string): string {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  formatBbox(values: number[] | null): string {
+    if (!values || values.length !== 4) {
+      return 'n/a';
+    }
+    return values.map((value) => value.toFixed(0)).join(', ');
   }
 }

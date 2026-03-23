@@ -56,10 +56,18 @@ def _build_compare_response(request: Request, *, video_id: str, user_id: str) ->
         }
         for item in request.app.state.pipeline_store.list_video_embeddings(video_id)
     ]
+    debug_frames = [
+        {
+            **item,
+            "image_url": media.get_presigned_url(item.get("image_s3")),
+        }
+        for item in request.app.state.pipeline_store.list_video_debug_frames(video_id)
+    ]
     threshold = _current_match_threshold()
 
     comparisons: list[dict[str, Any]] = []
     video_frames: list[dict[str, Any]] = []
+    debug_frame_results: list[dict[str, Any]] = []
     if user_embeddings and video_embeddings:
         user_vectors = [item["embedding"] for item in user_embeddings]
         video_vectors = [item["embedding"] for item in video_embeddings]
@@ -119,6 +127,90 @@ def _build_compare_response(request: Request, *, video_id: str, user_id: str) ->
             for item in video_embeddings
         ]
 
+    if user_embeddings and debug_frames:
+        debug_frame_items = [item for item in debug_frames if item.get("embedding") is not None]
+        if debug_frame_items:
+            user_vectors = [item["embedding"] for item in user_embeddings]
+            frame_distances = pairwise_euclidean_distances(
+                [item["embedding"] for item in debug_frame_items],
+                user_vectors,
+            )
+            frame_similarities = pairwise_cosine_similarity(
+                [item["embedding"] for item in debug_frame_items],
+                user_vectors,
+            )
+
+            for frame_index, frame in enumerate(debug_frame_items):
+                best_match_index = int(frame_distances[frame_index].argmin())
+                debug_frame_results.append(
+                    {
+                        "debug_frame_id": frame["debug_frame_id"],
+                        "track_id": frame["track_id"],
+                        "frame_index": frame["frame_index"],
+                        "frame_timestamp": frame.get("frame_timestamp"),
+                        "image_url": frame.get("image_url"),
+                        "bbox": frame.get("bbox"),
+                        "face_bbox": frame.get("face_bbox"),
+                        "has_face": frame.get("has_face", False),
+                        "is_valid": frame.get("is_valid", False),
+                        "used_for_embedding": frame.get("used_for_embedding", False),
+                        "user_embedding_id": user_embeddings[best_match_index]["user_embedding_id"],
+                        "distance": float(frame_distances[frame_index, best_match_index]),
+                        "similarity": float(frame_similarities[frame_index, best_match_index]),
+                        "is_match_under_threshold": float(frame_distances[frame_index, best_match_index]) <= threshold,
+                    }
+                )
+
+        frames_without_embeddings = [item for item in debug_frames if item.get("embedding") is None]
+        debug_frame_results.extend(
+            [
+                {
+                    "debug_frame_id": frame["debug_frame_id"],
+                    "track_id": frame["track_id"],
+                    "frame_index": frame["frame_index"],
+                    "frame_timestamp": frame.get("frame_timestamp"),
+                    "image_url": frame.get("image_url"),
+                    "bbox": frame.get("bbox"),
+                    "face_bbox": frame.get("face_bbox"),
+                    "has_face": frame.get("has_face", False),
+                    "is_valid": frame.get("is_valid", False),
+                    "used_for_embedding": frame.get("used_for_embedding", False),
+                    "user_embedding_id": None,
+                    "distance": None,
+                    "similarity": None,
+                    "is_match_under_threshold": False,
+                }
+                for frame in frames_without_embeddings
+            ]
+        )
+    else:
+        debug_frame_results = [
+            {
+                "debug_frame_id": frame["debug_frame_id"],
+                "track_id": frame["track_id"],
+                "frame_index": frame["frame_index"],
+                "frame_timestamp": frame.get("frame_timestamp"),
+                "image_url": frame.get("image_url"),
+                "bbox": frame.get("bbox"),
+                "face_bbox": frame.get("face_bbox"),
+                "has_face": frame.get("has_face", False),
+                "is_valid": frame.get("is_valid", False),
+                "used_for_embedding": frame.get("used_for_embedding", False),
+                "user_embedding_id": None,
+                "distance": None,
+                "similarity": None,
+                "is_match_under_threshold": False,
+            }
+            for frame in debug_frames
+        ]
+
+    debug_frame_results.sort(
+        key=lambda item: (
+            item["track_id"],
+            item["frame_index"],
+        )
+    )
+
     best_reference_image_url = None
     best_reference_user_embedding_id = None
     if comparisons:
@@ -154,6 +246,18 @@ def _build_compare_response(request: Request, *, video_id: str, user_id: str) ->
             if item.get("source_image_url")
         ],
         "video_frames": video_frames,
+        "debug_frames": debug_frame_results,
+        "summary": {
+            "total_frames": len(debug_frame_results),
+            "valid_frames": sum(1 for item in debug_frame_results if item.get("is_valid")),
+            "best_similarity": None if not comparisons else comparisons[0]["similarity"],
+            "best_distance": None if not comparisons else comparisons[0]["distance"],
+            "force_match": bool(
+                comparisons
+                and comparisons[0]["similarity"] > 0.82
+                and comparisons[0]["distance"] < threshold
+            ),
+        },
         "threshold": threshold,
     }
 

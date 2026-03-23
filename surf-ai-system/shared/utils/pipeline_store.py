@@ -78,6 +78,33 @@ class PipelineStore:
             self._ensure_column(conn, "video_embeddings", "end_time", "TEXT")
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS video_debug_frames (
+                    id TEXT PRIMARY KEY,
+                    video_id TEXT NOT NULL,
+                    track_id TEXT NOT NULL,
+                    frame_index INTEGER NOT NULL,
+                    frame_timestamp TEXT,
+                    image_s3 TEXT,
+                    bbox_json TEXT,
+                    face_bbox_json TEXT,
+                    embedding_json TEXT,
+                    has_face INTEGER NOT NULL DEFAULT 0,
+                    is_valid INTEGER NOT NULL DEFAULT 0,
+                    used_for_embedding INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(video_id, track_id, frame_index)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_video_debug_frames_video_track
+                ON video_debug_frames(video_id, track_id, frame_index ASC)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS cameras (
                     camera_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -232,6 +259,7 @@ class PipelineStore:
             raise ValueError("Video embedding cannot be normalized")
 
         now = datetime.now(timezone.utc).isoformat()
+        created = False
         with self.store.connection() as conn:
             existing = conn.execute(
                 """
@@ -267,6 +295,7 @@ class PipelineStore:
                     ),
                 )
             else:
+                created = True
                 embedding_id = str(uuid.uuid4())
                 created_at = now
                 conn.execute(
@@ -310,6 +339,7 @@ class PipelineStore:
             "end_time": end_time,
             "created_at": created_at,
             "updated_at": now,
+            "created": created,
         }
 
     def list_video_embeddings(self, video_id: str) -> list[dict[str, Any]]:
@@ -338,6 +368,135 @@ class PipelineStore:
                 (video_id,),
             ).fetchall()
         return [self._video_embedding_from_row(row) for row in rows]
+
+    def upsert_video_debug_frame(
+        self,
+        *,
+        video_id: str,
+        track_id: str,
+        frame_index: int,
+        frame_timestamp: str | None = None,
+        image_s3: str | None = None,
+        bbox: list[float] | None = None,
+        face_bbox: list[float] | None = None,
+        embedding: list[float] | None = None,
+        has_face: bool = False,
+        is_valid: bool = False,
+        used_for_embedding: bool = False,
+    ) -> dict[str, Any]:
+        normalized_embedding = None
+        if embedding is not None:
+            normalized_embedding = normalize_embedding_vector(embedding)
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.store.connection() as conn:
+            existing = conn.execute(
+                """
+                SELECT id, created_at
+                FROM video_debug_frames
+                WHERE video_id = ? AND track_id = ? AND frame_index = ?
+                """,
+                (video_id, track_id, int(frame_index)),
+            ).fetchone()
+
+            embedding_json = None if normalized_embedding is None else json.dumps(normalized_embedding.astype(float).tolist())
+            bbox_json = None if bbox is None else json.dumps([float(value) for value in bbox])
+            face_bbox_json = None if face_bbox is None else json.dumps([float(value) for value in face_bbox])
+
+            if existing:
+                frame_id = existing["id"]
+                created_at = existing["created_at"]
+                conn.execute(
+                    """
+                    UPDATE video_debug_frames
+                    SET frame_timestamp = ?, image_s3 = ?, bbox_json = ?, face_bbox_json = ?, embedding_json = ?,
+                        has_face = ?, is_valid = ?, used_for_embedding = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        frame_timestamp,
+                        image_s3,
+                        bbox_json,
+                        face_bbox_json,
+                        embedding_json,
+                        1 if has_face else 0,
+                        1 if is_valid else 0,
+                        1 if used_for_embedding else 0,
+                        now,
+                        frame_id,
+                    ),
+                )
+            else:
+                frame_id = str(uuid.uuid4())
+                created_at = now
+                conn.execute(
+                    """
+                    INSERT INTO video_debug_frames (
+                        id, video_id, track_id, frame_index, frame_timestamp, image_s3, bbox_json, face_bbox_json,
+                        embedding_json, has_face, is_valid, used_for_embedding, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        frame_id,
+                        video_id,
+                        track_id,
+                        int(frame_index),
+                        frame_timestamp,
+                        image_s3,
+                        bbox_json,
+                        face_bbox_json,
+                        embedding_json,
+                        1 if has_face else 0,
+                        1 if is_valid else 0,
+                        1 if used_for_embedding else 0,
+                        created_at,
+                        now,
+                    ),
+                )
+
+        return {
+            "debug_frame_id": frame_id,
+            "video_id": video_id,
+            "track_id": track_id,
+            "frame_index": int(frame_index),
+            "frame_timestamp": frame_timestamp,
+            "image_s3": image_s3,
+            "bbox": None if bbox is None else [float(value) for value in bbox],
+            "face_bbox": None if face_bbox is None else [float(value) for value in face_bbox],
+            "embedding": None if normalized_embedding is None else normalized_embedding.astype(float).tolist(),
+            "has_face": bool(has_face),
+            "is_valid": bool(is_valid),
+            "used_for_embedding": bool(used_for_embedding),
+            "created_at": created_at,
+            "updated_at": now,
+        }
+
+    def list_video_debug_frames(self, video_id: str) -> list[dict[str, Any]]:
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    video_id,
+                    track_id,
+                    frame_index,
+                    frame_timestamp,
+                    image_s3,
+                    bbox_json,
+                    face_bbox_json,
+                    embedding_json,
+                    has_face,
+                    is_valid,
+                    used_for_embedding,
+                    created_at,
+                    updated_at
+                FROM video_debug_frames
+                WHERE video_id = ?
+                ORDER BY track_id ASC, frame_index ASC, id ASC
+                """,
+                (video_id,),
+            ).fetchall()
+        return [self._video_debug_frame_from_row(row) for row in rows]
 
     def upsert_camera(
         self,
@@ -437,6 +596,28 @@ class PipelineStore:
             "keyframe_s3": row["keyframe_s3"],
             "start_time": row["start_time"],
             "end_time": row["end_time"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _video_debug_frame_from_row(self, row) -> dict[str, Any]:
+        raw_embedding = None if row["embedding_json"] is None else json.loads(row["embedding_json"])
+        normalized_embedding = None if raw_embedding is None else normalize_embedding_vector(raw_embedding)
+        bbox = None if row["bbox_json"] is None else json.loads(row["bbox_json"])
+        face_bbox = None if row["face_bbox_json"] is None else json.loads(row["face_bbox_json"])
+        return {
+            "debug_frame_id": row["id"],
+            "video_id": row["video_id"],
+            "track_id": row["track_id"],
+            "frame_index": int(row["frame_index"]),
+            "frame_timestamp": row["frame_timestamp"],
+            "image_s3": row["image_s3"],
+            "bbox": bbox,
+            "face_bbox": face_bbox,
+            "embedding": None if normalized_embedding is None else normalized_embedding.astype(float).tolist(),
+            "has_face": bool(row["has_face"]),
+            "is_valid": bool(row["is_valid"]),
+            "used_for_embedding": bool(row["used_for_embedding"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

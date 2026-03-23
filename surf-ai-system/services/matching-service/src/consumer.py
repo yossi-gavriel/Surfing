@@ -97,7 +97,7 @@ class MatchingConsumer:
                 "Match found for track_id=%s user_id=%s "
                 "(score=%.4f second_best_score=%s margin=%s distance=%.4f mean=%.4f max=%.4f std=%.4f "
                 "embeddings_used=%d evidence_count=%d confidence=%.4f "
-                "confidence_breakdown=1-distance decision=accepted)",
+                "confidence_breakdown=1-distance decision=%s)",
                 match_result.track_id,
                 match_result.user_id,
                 match_result.score,
@@ -110,6 +110,7 @@ class MatchingConsumer:
                 match_result.embeddings_used,
                 match_result.track_evidence_count,
                 match_result.confidence,
+                "accepted-force-match" if match_result.force_match_used else "accepted",
             )
             self._delete_message(receipt_handle)
         except PermanentMessageError as exc:

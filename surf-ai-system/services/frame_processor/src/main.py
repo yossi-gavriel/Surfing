@@ -184,6 +184,7 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
                     "end_time": current_time_iso,
                     "best_conf": 0.0,
                     "best_frame_crop": None,
+                    "debug_frames": [],
                 }
 
             tracks_history[tid]["bboxes"].append(bbox)
@@ -191,6 +192,39 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
             tracks_history[tid]["frame_timestamps"].append(current_time_iso)
             tracks_history[tid]["confidences"].append(conf)
             tracks_history[tid]["end_time"] = current_time_iso
+
+            if source["source_type"] == "video":
+                bx1, by1, bx2, by2 = [int(value) for value in bbox]
+                bx1, by1 = max(0, bx1), max(0, by1)
+                bx2, by2 = min(frame.shape[1], bx2), min(frame.shape[0], by2)
+                if bx2 > bx1 and by2 > by1:
+                    crop = frame[by1:by2, bx1:bx2].copy()
+                    debug_frame_name = f"{tid}_{frame_idx:06d}.jpg"
+                    debug_frame_local = os.path.join(keyframe_dir, f"debug_{debug_frame_name}")
+                    cv2.imwrite(debug_frame_local, crop)
+                    debug_frame_s3_key = f"debug-frames/{source['storage_key']}/{debug_frame_name}"
+                    s3_client.upload_file(debug_frame_local, config.s3_bucket, debug_frame_s3_key)
+                    if os.path.exists(debug_frame_local):
+                        os.remove(debug_frame_local)
+
+                    debug_frame_s3 = f"s3://{config.s3_bucket}/{debug_frame_s3_key}"
+                    debug_frame_record = {
+                        "frame_index": frame_idx,
+                        "frame_timestamp": current_time_iso,
+                        "image_s3": debug_frame_s3,
+                        "bbox": [float(value) for value in bbox],
+                    }
+                    tracks_history[tid]["debug_frames"].append(debug_frame_record)
+
+                    if pipeline_store and source["video_id"]:
+                        pipeline_store.upsert_video_debug_frame(
+                            video_id=source["video_id"],
+                            track_id=str(tid),
+                            frame_index=frame_idx,
+                            frame_timestamp=current_time_iso,
+                            image_s3=debug_frame_s3,
+                            bbox=[float(value) for value in bbox],
+                        )
 
             if conf > tracks_history[tid]["best_conf"]:
                 tracks_history[tid]["best_conf"] = conf

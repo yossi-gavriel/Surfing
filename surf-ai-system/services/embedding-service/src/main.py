@@ -80,27 +80,67 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
         last_track_id=track_id,
     )
     
-    keyframes = msg_body.get("keyframes", [])
-    if "keyframe_s3" in msg_body and msg_body["keyframe_s3"]:
-        keyframes.append(msg_body["keyframe_s3"])
-        
-    keyframes = list(set(keyframes))
-    frames_received = len(keyframes)
-    
-    if not keyframes:
+    debug_frames = msg_body.get("debug_frames") or []
+    frame_sources: list[dict] = []
+    if debug_frames:
+        for index, debug_frame in enumerate(debug_frames):
+            frame_sources.append(
+                {
+                    "frame_index": int(debug_frame.get("frame_index", index)),
+                    "frame_timestamp": debug_frame.get("frame_timestamp"),
+                    "image_s3": debug_frame.get("image_s3"),
+                    "bbox": debug_frame.get("bbox"),
+                }
+            )
+    else:
+        keyframes = msg_body.get("keyframes", [])
+        if "keyframe_s3" in msg_body and msg_body["keyframe_s3"]:
+            keyframes.append(msg_body["keyframe_s3"])
+        keyframes = list(dict.fromkeys(keyframes))
+        frame_sources = [
+            {
+                "frame_index": index,
+                "frame_timestamp": None,
+                "image_s3": s3_path,
+                "bbox": None,
+            }
+            for index, s3_path in enumerate(keyframes)
+        ]
+
+    frames_received = len(frame_sources)
+
+    if not frame_sources:
         logger.info(f"[{track_id}] No keyframes securely identified. Gracefully bypassing extraction arrays.")
         return
         
     faces_data = []
     frames_processed = 0
-    
-    for idx, s3_path in enumerate(keyframes):
-        local_path = f"/tmp/{camera_id}_{track_id}_{idx}.jpg"
+    debug_frame_records: dict[int, dict] = {}
+
+    for frame_source in frame_sources:
+        frame_index = int(frame_source["frame_index"])
+        s3_path = frame_source.get("image_s3")
+        if not s3_path:
+            continue
+
+        local_path = f"/tmp/{camera_id}_{track_id}_{frame_index}.jpg"
         if download_image(s3_path, local_path):
             img = cv2.imread(local_path)
             if img is not None:
                 frames_processed += 1
                 faces = detector.detect(img)
+                has_face = len(faces) > 0
+                debug_record = {
+                    "frame_index": frame_index,
+                    "frame_timestamp": frame_source.get("frame_timestamp"),
+                    "image_s3": s3_path,
+                    "bbox": frame_source.get("bbox"),
+                    "has_face": has_face,
+                    "face_bbox": None,
+                    "embedding": None,
+                    "is_valid": False,
+                    "used_for_embedding": False,
+                }
                 
                 valid_faces = []
                 for face in faces:
@@ -128,7 +168,8 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
                         "size": face_size,
                         "blur": blur,
                         "det_score": face.det_score,
-                        "quality_score": quality
+                        "quality_score": quality,
+                        "source_frame_index": frame_index,
                     })
                     
                 if valid_faces:
@@ -147,17 +188,43 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
                     )
                     
                     emb = embedder.extract_embedding(best_face_data["face"])
+                    debug_record["face_bbox"] = [float(value) for value in best_face_data["face"].bbox]
+                    debug_record["embedding"] = emb.astype(float).tolist()
+                    debug_record["is_valid"] = True
                     
                     faces_data.append({
                         "embedding": emb,
                         "quality_score": best_face_data["quality_score"],
-                        "det_score": best_face_data["det_score"]
+                        "det_score": best_face_data["det_score"],
+                        "source_frame_index": frame_index,
                     })
-                    
+                debug_frame_records[frame_index] = debug_record
+
+                if video_id:
+                    pipeline_store.upsert_video_debug_frame(
+                        video_id=video_id,
+                        track_id=str(track_id),
+                        frame_index=frame_index,
+                        frame_timestamp=frame_source.get("frame_timestamp"),
+                        image_s3=s3_path,
+                        bbox=frame_source.get("bbox"),
+                        face_bbox=debug_record["face_bbox"],
+                        embedding=debug_record["embedding"],
+                        has_face=debug_record["has_face"],
+                        is_valid=debug_record["is_valid"],
+                        used_for_embedding=False,
+                    )
+
             if os.path.exists(local_path):
                 os.remove(local_path)
 
     embeddings_created = len(faces_data)
+    logger.info(
+        {
+            "track_id": track_id,
+            "num_embeddings_before_merge": embeddings_created,
+        }
+    )
     print(
         {
             "track_id": track_id,
@@ -166,10 +233,18 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
         }
     )
 
-    agg_emb, final_conf, num_faces, avg_quality, consistency = aggregator.aggregate(faces_data)
+    agg_emb, final_conf, num_faces, avg_quality, consistency, used_frame_indexes = aggregator.aggregate(faces_data)
     
     if agg_emb is None:
         logger.warning(f"[{track_id}] Aggregate explicitly canceled mapped to 0 logical faces across keyframes.")
+        logger.info(
+            {
+                "track_id": track_id,
+                "total_frames": frames_received,
+                "valid_face_frames": embeddings_created,
+                "frames_used_for_embedding": 0,
+            }
+        )
         update_video_embedding_diagnostics(
             video_id,
             tracks_without_faces_increment=1,
@@ -193,10 +268,34 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
             end_time=msg_body.get("end_time"),
         )
 
+        for frame_index, debug_record in debug_frame_records.items():
+            pipeline_store.upsert_video_debug_frame(
+                video_id=video_id,
+                track_id=str(track_id),
+                frame_index=frame_index,
+                frame_timestamp=debug_record.get("frame_timestamp"),
+                image_s3=debug_record.get("image_s3"),
+                bbox=debug_record.get("bbox"),
+                face_bbox=debug_record.get("face_bbox"),
+                embedding=debug_record.get("embedding"),
+                has_face=debug_record.get("has_face", False),
+                is_valid=debug_record.get("is_valid", False),
+                used_for_embedding=frame_index in set(used_frame_indexes),
+            )
+
+    logger.info(
+        {
+            "track_id": track_id,
+            "total_frames": frames_received,
+            "valid_face_frames": embeddings_created,
+            "frames_used_for_embedding": len(set(used_frame_indexes)),
+        }
+    )
+
     below_threshold = 1 if num_faces < config.matching_min_track_embeddings else 0
     update_video_embedding_diagnostics(
         video_id,
-        tracks_with_embeddings_increment=1,
+        tracks_with_embeddings_increment=1 if (video_embedding_record and video_embedding_record.get("created")) else 0,
         tracks_below_matching_threshold_increment=below_threshold,
         valid_faces_detected_increment=num_faces,
         last_track_id=track_id,
@@ -216,6 +315,7 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
         "face_embedding": agg_emb,
         "embedding_confidence": float(final_conf),
         "num_faces_detected": num_faces,
+        "num_embeddings": len(set(used_frame_indexes)),
         "avg_quality": float(avg_quality),
         "consistency": float(consistency)
     }

@@ -3,7 +3,7 @@ from typing import Any
 
 import numpy as np
 
-from shared.utils.embeddings import pairwise_euclidean_distances
+from shared.utils.embeddings import pairwise_cosine_similarity, pairwise_euclidean_distances
 from shared.utils.logger import get_logger
 from src.config import MatchingConfig
 from src.db import UsersDB, normalize_embeddings
@@ -32,6 +32,7 @@ class MatchResult:
     payload_consistency: float | None
     second_best_score: float | None
     score_margin: float | None
+    force_match_used: bool
 
 
 @dataclass
@@ -39,6 +40,7 @@ class CandidateScore:
     user_id: str
     best_user_embedding_id: str | None
     aggregated_distance: float
+    best_similarity: float
     mean_distance: float
     max_distance: float
     distance_std: float
@@ -70,14 +72,55 @@ class Matcher:
             payload_consistency=payload_consistency,
         )
         if validation_error is not None:
-            self._log_single_embedding_debug(
-                payload=payload,
+            track_embedding = self._aggregate_track_embeddings(track_embeddings)
+            ranked_candidates = self._rank_candidates(
                 users=users,
+                track_embedding=track_embedding,
                 track_embeddings=track_embeddings,
                 evidence_count=evidence_count,
                 payload_consistency=payload_consistency,
             )
-            raise ValueError(validation_error)
+            if not ranked_candidates:
+                self._log_single_embedding_debug(
+                    payload=payload,
+                    users=users,
+                    track_embeddings=track_embeddings,
+                    evidence_count=evidence_count,
+                    payload_consistency=payload_consistency,
+                )
+                raise ValueError(validation_error)
+
+            best_candidate = ranked_candidates[0]
+            force_match = self._should_force_match(best_candidate)
+            logger.info(
+                {
+                    "track_id": payload.get("track_id"),
+                    "frames": evidence_count,
+                    "valid_frames": len(track_embeddings),
+                    "best_similarity": best_candidate.best_similarity,
+                    "force_match": force_match,
+                }
+            )
+            if not force_match:
+                self._log_single_embedding_debug(
+                    payload=payload,
+                    users=users,
+                    track_embeddings=track_embeddings,
+                    evidence_count=evidence_count,
+                    payload_consistency=payload_consistency,
+                    ranked_candidates=ranked_candidates,
+                )
+                raise ValueError(validation_error)
+
+            return self._build_match_result(
+                payload=payload,
+                best_candidate=best_candidate,
+                second_best_candidate=ranked_candidates[1] if len(ranked_candidates) > 1 else None,
+                embeddings_used=len(track_embeddings),
+                evidence_count=evidence_count,
+                payload_consistency=payload_consistency,
+                force_match_used=True,
+            )
 
         track_embedding = self._aggregate_track_embeddings(track_embeddings)
         ranked_candidates = self._rank_candidates(
@@ -94,11 +137,13 @@ class Matcher:
         best_candidate = ranked_candidates[0]
         second_best_candidate = ranked_candidates[1] if len(ranked_candidates) > 1 else None
         score_margin = self._get_score_margin(best_candidate, second_best_candidate)
-        decision, rejection_reason = self._decide_match(
+        original_decision, rejection_reason = self._decide_match(
             best_candidate=best_candidate,
             second_best_candidate=second_best_candidate,
             score_margin=score_margin,
         )
+        force_match = self._should_force_match(best_candidate) if not original_decision else False
+        decision = original_decision or force_match
 
         logger.info(
             "Decision for track_id=%s user_id=%s best_score=%.4f second_best_score=%s margin=%s decision=%s",
@@ -107,7 +152,16 @@ class Matcher:
             best_candidate.final_score,
             "n/a" if second_best_candidate is None else f"{second_best_candidate.final_score:.4f}",
             "n/a" if score_margin is None else f"{score_margin:.4f}",
-            "accepted" if decision else f"rejected ({rejection_reason})",
+            "accepted-force-match" if force_match else "accepted" if decision else f"rejected ({rejection_reason})",
+        )
+        logger.info(
+            {
+                "track_id": payload.get("track_id"),
+                "frames": evidence_count,
+                "valid_frames": len(track_embeddings),
+                "best_similarity": best_candidate.best_similarity,
+                "force_match": force_match,
+            }
         )
 
         if not decision:
@@ -140,27 +194,14 @@ class Matcher:
             )
             return None
 
-        confidence = max(0.0, min(1.0, 1.0 - best_candidate.aggregated_distance))
-        return MatchResult(
-            user_id=best_candidate.user_id,
-            track_id=str(payload["track_id"]),
-            camera_id=payload.get("camera_id"),
-            video_id=self._get_video_id(payload),
-            source_video_s3=payload.get("source_video_s3"),
-            timestamp=self._get_timestamp(payload),
-            keyframe=self._get_keyframe(payload),
-            keyframe_s3=payload.get("keyframe_s3") or payload.get("keyframe"),
-            score=best_candidate.final_score,
-            confidence=confidence,
-            min_distance=best_candidate.aggregated_distance,
-            mean_distance=best_candidate.mean_distance,
-            max_distance=best_candidate.max_distance,
-            distance_std=best_candidate.distance_std,
+        return self._build_match_result(
+            payload=payload,
+            best_candidate=best_candidate,
+            second_best_candidate=second_best_candidate,
             embeddings_used=len(track_embeddings),
-            track_evidence_count=evidence_count,
+            evidence_count=evidence_count,
             payload_consistency=payload_consistency,
-            second_best_score=None if second_best_candidate is None else second_best_candidate.final_score,
-            score_margin=score_margin,
+            force_match_used=force_match,
         )
 
     def _extract_track_embeddings(self, payload: dict[str, Any]) -> np.ndarray:
@@ -262,8 +303,10 @@ class Matcher:
         payload_consistency: float | None,
     ) -> CandidateScore:
         aggregated_distances = pairwise_euclidean_distances(user["embeddings"], track_embedding)
+        aggregated_similarities = pairwise_cosine_similarity(user["embeddings"], track_embedding)
         aggregated_distance_index = int(np.argmin(aggregated_distances))
         aggregated_distance = float(aggregated_distances.reshape(-1)[aggregated_distance_index])
+        best_similarity = float(aggregated_similarities.reshape(-1)[aggregated_distance_index])
         best_user_embedding_id = None
         if user.get("embedding_ids"):
             best_user_embedding_id = user["embedding_ids"][aggregated_distance_index]
@@ -284,6 +327,7 @@ class Matcher:
                 user_id=user["user_id"],
                 best_user_embedding_id=best_user_embedding_id,
                 aggregated_distance=aggregated_distance,
+                best_similarity=best_similarity,
                 mean_distance=mean_distance,
                 max_distance=max_distance,
                 distance_std=distance_std,
@@ -299,6 +343,7 @@ class Matcher:
             user_id=user["user_id"],
             best_user_embedding_id=best_user_embedding_id,
             aggregated_distance=aggregated_distance,
+            best_similarity=best_similarity,
             mean_distance=mean_distance,
             max_distance=max_distance,
             distance_std=distance_std,
@@ -413,6 +458,48 @@ class Matcher:
         )
         if would_match:
             print("Would have matched if single embedding was allowed")
+
+    def _should_force_match(self, candidate: CandidateScore) -> bool:
+        return (
+            candidate.best_similarity > 0.82
+            and candidate.aggregated_distance < self.config.match_threshold
+        )
+
+    def _build_match_result(
+        self,
+        *,
+        payload: dict[str, Any],
+        best_candidate: CandidateScore,
+        second_best_candidate: CandidateScore | None,
+        embeddings_used: int,
+        evidence_count: int,
+        payload_consistency: float | None,
+        force_match_used: bool,
+    ) -> MatchResult:
+        score_margin = self._get_score_margin(best_candidate, second_best_candidate)
+        confidence = max(0.0, min(1.0, 1.0 - best_candidate.aggregated_distance))
+        return MatchResult(
+            user_id=best_candidate.user_id,
+            track_id=str(payload["track_id"]),
+            camera_id=payload.get("camera_id"),
+            video_id=self._get_video_id(payload),
+            source_video_s3=payload.get("source_video_s3"),
+            timestamp=self._get_timestamp(payload),
+            keyframe=self._get_keyframe(payload),
+            keyframe_s3=payload.get("keyframe_s3") or payload.get("keyframe"),
+            score=best_candidate.final_score,
+            confidence=confidence,
+            min_distance=best_candidate.aggregated_distance,
+            mean_distance=best_candidate.mean_distance,
+            max_distance=best_candidate.max_distance,
+            distance_std=best_candidate.distance_std,
+            embeddings_used=embeddings_used,
+            track_evidence_count=evidence_count,
+            payload_consistency=payload_consistency,
+            second_best_score=None if second_best_candidate is None else second_best_candidate.final_score,
+            score_margin=score_margin,
+            force_match_used=force_match_used,
+        )
 
     def _get_video_id(self, payload: dict[str, Any]) -> str | None:
         return payload.get("video_id") or payload.get("source_video_id")

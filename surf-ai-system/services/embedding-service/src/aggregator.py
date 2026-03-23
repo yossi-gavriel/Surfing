@@ -13,7 +13,7 @@ class EmbeddingAggregator:
         
     def aggregate(self, faces_data):
         if not faces_data:
-            return None, 0.0, 0, 0.0, 0.0
+            return None, 0.0, 0, 0.0, 0.0, []
             
         # 1. Diversity Filtering natively
         diverse_data = []
@@ -33,7 +33,7 @@ class EmbeddingAggregator:
                 diverse_data.append(fd)
                 
         if not diverse_data:
-            return None, 0.0, 0, 0.0, 0.0
+            return None, 0.0, 0, 0.0, 0.0, []
 
         # 2. Outlier Removal algorithms mapping distance topologies securely
         embeddings = np.array([fd["embedding"] for fd in diverse_data])
@@ -90,5 +90,11 @@ class EmbeddingAggregator:
         # 5. Composite End-Confidence Formulations penalizing minor hits strictly linearly
         sample_penalty = min(n / float(self.min_samples), 1.0)
         final_confidence = avg_det * consistency * sample_penalty
-        
-        return agg_emb.tolist(), float(final_confidence), n, avg_quality, consistency
+
+        used_frame_indexes = [
+            int(fd["source_frame_index"])
+            for fd in diverse_data
+            if fd.get("source_frame_index") is not None
+        ]
+
+        return agg_emb.tolist(), float(final_confidence), n, avg_quality, consistency, used_frame_indexes
