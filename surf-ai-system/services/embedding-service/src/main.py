@@ -188,6 +188,9 @@ def process_track(msg_body: dict, detector: FaceDetector, embedder: FaceEmbedder
             embeddings_created=embeddings_created,
             confidence=float(final_conf),
             consistency=float(consistency),
+            keyframe_s3=msg_body.get("keyframe_s3"),
+            start_time=msg_body.get("start_time"),
+            end_time=msg_body.get("end_time"),
         )
 
     below_threshold = 1 if num_faces < config.matching_min_track_embeddings else 0

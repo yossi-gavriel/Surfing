@@ -160,6 +160,13 @@ interface CameraRecord {
               >
                 {{ processingVideoId() === video.video_id ? 'Queueing...' : 'Trigger pipeline' }}
               </button>
+              <button
+                class="secondary"
+                type="button"
+                (click)="openVideoDebug(video.video_id)"
+              >
+                Open debug view
+              </button>
             </div>
           </div>
         </div>
@@ -622,6 +629,10 @@ export class AdminComponent {
           this.handleHttpError(error, 'Unable to trigger processing.');
         },
       });
+  }
+
+  openVideoDebug(videoId: string): void {
+    this.router.navigate(['/admin/videos', videoId]);
   }
 
   formatTimestamp(value: string): string {

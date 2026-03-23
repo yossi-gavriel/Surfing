@@ -40,38 +40,120 @@ def _current_match_threshold() -> float:
 
 
 def _build_compare_response(request: Request, *, video_id: str, user_id: str) -> dict[str, Any]:
-    user_embeddings = request.app.state.db.list_user_embeddings(user_id)
-    video_embeddings = request.app.state.pipeline_store.list_video_embeddings(video_id)
+    media = request.app.state.media_service
+    user_embeddings = [
+        {
+            **item,
+            "source_image_url": media.get_presigned_url(item.get("source_image_s3")),
+        }
+        for item in request.app.state.db.list_user_embeddings(user_id)
+    ]
+    video_embeddings = [
+        {
+            **item,
+            "keyframe_url": media.get_presigned_url(item.get("keyframe_s3"))
+            or media.get_presigned_url(key=f"thumbnails/{item.get('track_id')}.jpg"),
+        }
+        for item in request.app.state.pipeline_store.list_video_embeddings(video_id)
+    ]
     threshold = _current_match_threshold()
 
     comparisons: list[dict[str, Any]] = []
+    video_frames: list[dict[str, Any]] = []
     if user_embeddings and video_embeddings:
         user_vectors = [item["embedding"] for item in user_embeddings]
         video_vectors = [item["embedding"] for item in video_embeddings]
         distances = pairwise_euclidean_distances(video_vectors, user_vectors)
         similarities = pairwise_cosine_similarity(video_vectors, user_vectors)
+        best_by_video_embedding: dict[str, dict[str, Any]] = {}
 
         for video_index, video_embedding in enumerate(video_embeddings):
             for user_index, user_embedding in enumerate(user_embeddings):
                 distance = float(distances[video_index, user_index])
                 similarity = float(similarities[video_index, user_index])
-                comparisons.append(
-                    {
+                comparison = {
+                    "video_embedding_id": video_embedding["video_embedding_id"],
+                    "user_embedding_id": user_embedding["user_embedding_id"],
+                    "distance": distance,
+                    "similarity": similarity,
+                    "is_match_under_threshold": distance <= threshold,
+                }
+                comparisons.append(comparison)
+
+                best_for_video = best_by_video_embedding.get(video_embedding["video_embedding_id"])
+                if best_for_video is None or distance < best_for_video["distance"]:
+                    best_by_video_embedding[video_embedding["video_embedding_id"]] = {
                         "video_embedding_id": video_embedding["video_embedding_id"],
-                        "user_embedding_id": user_embedding["user_embedding_id"],
+                        "track_id": video_embedding["track_id"],
+                        "keyframe_s3": video_embedding.get("keyframe_s3"),
+                        "keyframe_url": video_embedding.get("keyframe_url"),
+                        "start_time": video_embedding.get("start_time"),
+                        "end_time": video_embedding.get("end_time"),
+                        "best_user_embedding_id": user_embedding["user_embedding_id"],
+                        "best_reference_image_url": user_embedding.get("source_image_url"),
                         "distance": distance,
                         "similarity": similarity,
                         "is_match_under_threshold": distance <= threshold,
                     }
-                )
 
         comparisons.sort(key=lambda item: item["distance"])
+        video_frames = sorted(
+            best_by_video_embedding.values(),
+            key=lambda item: item["distance"],
+        )
+    else:
+        video_frames = [
+            {
+                "video_embedding_id": item["video_embedding_id"],
+                "track_id": item["track_id"],
+                "keyframe_s3": item.get("keyframe_s3"),
+                "keyframe_url": item.get("keyframe_url"),
+                "start_time": item.get("start_time"),
+                "end_time": item.get("end_time"),
+                "best_user_embedding_id": None,
+                "best_reference_image_url": None,
+                "distance": None,
+                "similarity": None,
+                "is_match_under_threshold": False,
+            }
+            for item in video_embeddings
+        ]
+
+    best_reference_image_url = None
+    best_reference_user_embedding_id = None
+    if comparisons:
+        best_reference_user_embedding_id = comparisons[0]["user_embedding_id"]
+        best_reference = next(
+            (item for item in user_embeddings if item["user_embedding_id"] == best_reference_user_embedding_id),
+            None,
+        )
+        best_reference_image_url = None if best_reference is None else best_reference.get("source_image_url")
+    elif user_embeddings:
+        latest_reference = next(
+            (item for item in reversed(user_embeddings) if item.get("source_image_url")),
+            None,
+        )
+        if latest_reference is not None:
+            best_reference_user_embedding_id = latest_reference["user_embedding_id"]
+            best_reference_image_url = latest_reference.get("source_image_url")
 
     return {
         "video_id": video_id,
         "user_embeddings": len(user_embeddings),
         "video_embeddings": len(video_embeddings),
         "comparisons": comparisons,
+        "best_reference_user_embedding_id": best_reference_user_embedding_id,
+        "best_reference_image_url": best_reference_image_url,
+        "reference_images": [
+            {
+                "user_embedding_id": item["user_embedding_id"],
+                "image_url": item.get("source_image_url"),
+                "created_at": item.get("created_at"),
+            }
+            for item in user_embeddings
+            if item.get("source_image_url")
+        ],
+        "video_frames": video_frames,
         "threshold": threshold,
     }
 

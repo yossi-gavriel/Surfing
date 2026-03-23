@@ -1,5 +1,6 @@
 from collections import defaultdict
 import os
+import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 
@@ -39,9 +40,25 @@ async def upload_face(
             detail={"code": exc.code, "message": exc.message},
         ) from exc
 
+    source_image_s3 = None
+    try:
+        _, extension = os.path.splitext(file.filename or "")
+        source_image_s3 = request.app.state.media_service.upload_bytes(
+            data=image_bytes,
+            key=f"uploads/reference-faces/{current_user['user_id']}/{uuid.uuid4()}{extension or '.jpg'}",
+            content_type=file.content_type or "image/jpeg",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Reference face image upload failed for user_id=%s: %s",
+            current_user["user_id"],
+            exc,
+        )
+
     updated_user = request.app.state.db.append_user_embedding(
         user_id=current_user["user_id"],
         embedding=result["embedding"],
+        source_image_s3=source_image_s3,
     )
     if not updated_user:
         raise HTTPException(status_code=404, detail="User not found")

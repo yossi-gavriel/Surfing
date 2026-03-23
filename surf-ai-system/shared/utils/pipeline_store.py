@@ -73,6 +73,9 @@ class PipelineStore:
                 ON video_embeddings(video_id, created_at DESC)
                 """
             )
+            self._ensure_column(conn, "video_embeddings", "keyframe_s3", "TEXT")
+            self._ensure_column(conn, "video_embeddings", "start_time", "TEXT")
+            self._ensure_column(conn, "video_embeddings", "end_time", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cameras (
@@ -220,6 +223,9 @@ class PipelineStore:
         embeddings_created: int = 0,
         confidence: float | None = None,
         consistency: float | None = None,
+        keyframe_s3: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
     ) -> dict[str, Any]:
         normalized = normalize_embedding_vector(embedding)
         if normalized is None:
@@ -243,7 +249,7 @@ class PipelineStore:
                     """
                     UPDATE video_embeddings
                     SET camera_id = ?, embedding_json = ?, frames_received = ?, embeddings_created = ?,
-                        confidence = ?, consistency = ?, updated_at = ?
+                        confidence = ?, consistency = ?, keyframe_s3 = ?, start_time = ?, end_time = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -253,6 +259,9 @@ class PipelineStore:
                         int(embeddings_created),
                         confidence,
                         consistency,
+                        keyframe_s3,
+                        start_time,
+                        end_time,
                         now,
                         embedding_id,
                     ),
@@ -264,8 +273,9 @@ class PipelineStore:
                     """
                     INSERT INTO video_embeddings (
                         id, video_id, track_id, camera_id, embedding_json, frames_received,
-                        embeddings_created, confidence, consistency, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        embeddings_created, confidence, consistency, keyframe_s3, start_time, end_time,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         embedding_id,
@@ -277,6 +287,9 @@ class PipelineStore:
                         int(embeddings_created),
                         confidence,
                         consistency,
+                        keyframe_s3,
+                        start_time,
+                        end_time,
                         created_at,
                         now,
                     ),
@@ -292,6 +305,9 @@ class PipelineStore:
             "embeddings_created": int(embeddings_created),
             "confidence": confidence,
             "consistency": consistency,
+            "keyframe_s3": keyframe_s3,
+            "start_time": start_time,
+            "end_time": end_time,
             "created_at": created_at,
             "updated_at": now,
         }
@@ -310,6 +326,9 @@ class PipelineStore:
                     embeddings_created,
                     confidence,
                     consistency,
+                    keyframe_s3,
+                    start_time,
+                    end_time,
                     created_at,
                     updated_at
                 FROM video_embeddings
@@ -415,6 +434,9 @@ class PipelineStore:
             "embeddings_created": int(row["embeddings_created"]),
             "confidence": row["confidence"],
             "consistency": row["consistency"],
+            "keyframe_s3": row["keyframe_s3"],
+            "start_time": row["start_time"],
+            "end_time": row["end_time"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

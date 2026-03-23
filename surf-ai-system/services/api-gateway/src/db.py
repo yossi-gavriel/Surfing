@@ -41,6 +41,7 @@ class SQLiteDB:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
                     embedding_json TEXT NOT NULL,
+                    source_image_s3 TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
                 )
@@ -52,6 +53,7 @@ class SQLiteDB:
                 ON user_embeddings(user_id, id DESC)
                 """
             )
+            self._ensure_column(conn, "user_embeddings", "source_image_s3", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS matches (
@@ -116,10 +118,10 @@ class SQLiteDB:
                             for embedding in embeddings or []:
                                 conn.execute(
                                     """
-                                    INSERT INTO user_embeddings (user_id, embedding_json, created_at)
-                                    VALUES (?, ?, ?)
+                                    INSERT INTO user_embeddings (user_id, embedding_json, source_image_s3, created_at)
+                                    VALUES (?, ?, ?, ?)
                                     """,
-                                    (user_id, json.dumps(embedding), created_at),
+                                    (user_id, json.dumps(embedding), None, created_at),
                                 )
                         conn.commit()
                     except Exception:
@@ -257,6 +259,7 @@ class SQLiteDB:
         self,
         user_id: str,
         embedding: list[float],
+        source_image_s3: str | None = None,
         max_embeddings: int = 5,
     ) -> dict[str, Any] | None:
         created_at = datetime.now(timezone.utc).isoformat()
@@ -277,10 +280,10 @@ class SQLiteDB:
 
                 conn.execute(
                     """
-                    INSERT INTO user_embeddings (user_id, embedding_json, created_at)
-                    VALUES (?, ?, ?)
+                    INSERT INTO user_embeddings (user_id, embedding_json, source_image_s3, created_at)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (user_id, json.dumps(embedding), created_at),
+                    (user_id, json.dumps(embedding), source_image_s3, created_at),
                 )
 
                 overflow_rows = conn.execute(
@@ -309,7 +312,7 @@ class SQLiteDB:
         with self.store.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, embedding_json, created_at
+                SELECT id, embedding_json, source_image_s3, created_at
                 FROM user_embeddings
                 WHERE user_id = ?
                 ORDER BY id ASC
@@ -327,10 +330,19 @@ class SQLiteDB:
                     "user_embedding_id": str(row["id"]),
                     "user_id": user_id,
                     "embedding": normalized.astype(float).tolist(),
+                    "source_image_s3": row["source_image_s3"],
                     "created_at": row["created_at"],
                 }
             )
         return embeddings
+
+    def _ensure_column(self, conn, table_name: str, column_name: str, column_definition: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if column_name not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+            )
 
     def list_matches_for_user(self, user_id: str) -> list[dict[str, Any]]:
         with self.store.connection() as conn:
