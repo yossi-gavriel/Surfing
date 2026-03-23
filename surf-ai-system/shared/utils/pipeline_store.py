@@ -126,6 +126,7 @@ class PipelineStore:
                 ON cameras(active, updated_at DESC)
                 """
             )
+            self._ensure_column(conn, "cameras", "pool_id", "TEXT")
 
     def create_video(
         self,
