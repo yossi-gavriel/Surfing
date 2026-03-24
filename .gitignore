@@ -15,3 +15,7 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+.idea/
+surf-ai-system/artifacts/
+surf-ai-system/ssm_*.json
