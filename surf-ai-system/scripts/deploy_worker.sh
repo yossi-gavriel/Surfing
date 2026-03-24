@@ -4,6 +4,15 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_BIN="${DOCKER_COMPOSE_BIN:-docker-compose}"
 SERVICE_NAME="${1:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  fi
+fi
 
 if [[ -z "$SERVICE_NAME" ]]; then
   echo "Usage: $0 <frame-processor|embedding-service|matching-service|clipper-service|ingestion-service>" >&2
@@ -31,17 +40,14 @@ queue_url_for_service() {
   esac
 }
 
-wait_for_safe_queue() {
+queue_counts_for_url() {
   local queue_url="$1"
-  if [[ -z "$queue_url" ]]; then
-    return 0
-  fi
-
-  for attempt in $(seq 1 30); do
-    local counts
-    counts="$(python - <<'PY'
+  if [[ -n "$PYTHON_BIN" ]] && "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import boto3  # noqa: F401
+PY
+  then
+    QUEUE_URL="$queue_url" "$PYTHON_BIN" - <<'PY'
 import boto3
-import json
 import os
 
 queue_url = os.environ["QUEUE_URL"]
@@ -51,24 +57,43 @@ attrs = client.get_queue_attributes(
     QueueUrl=queue_url,
     AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"],
 )["Attributes"]
-print(json.dumps({
-    "visible": int(attrs.get("ApproximateNumberOfMessages", "0")),
-    "inflight": int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0")),
-}))
+visible = int(attrs.get("ApproximateNumberOfMessages", "0"))
+inflight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0"))
+print(f"{visible} {inflight}")
 PY
-)"
-    local inflight
-    inflight="$(COUNTS_JSON="$counts" python - <<'PY'
-import json
-import os
-print(json.loads(os.environ["COUNTS_JSON"])["inflight"])
-PY
-)"
+    return
+  fi
+
+  if command -v aws >/dev/null 2>&1; then
+    aws sqs get-queue-attributes \
+      --queue-url "$queue_url" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --region "${AWS_REGION:-us-east-1}" \
+      --query '[Attributes.ApproximateNumberOfMessages, Attributes.ApproximateNumberOfMessagesNotVisible]' \
+      --output text
+    return
+  fi
+
+  echo "Missing queue inspection dependency (python+boto3 or aws CLI)" >&2
+  return 1
+}
+
+wait_for_safe_queue() {
+  local queue_url="$1"
+  if [[ -z "$queue_url" ]]; then
+    return 0
+  fi
+
+  for attempt in $(seq 1 30); do
+    local counts
+    counts="$(queue_counts_for_url "$queue_url")"
+    local visible inflight
+    read -r visible inflight <<< "$counts"
     if [[ "$inflight" == "0" ]]; then
-      echo "Queue is safe: $counts"
+      echo "Queue is safe: visible=$visible inflight=$inflight"
       return 0
     fi
-    echo "Waiting for in-flight work to drain: $counts"
+    echo "Waiting for in-flight work to drain: visible=$visible inflight=$inflight"
     sleep 2
   done
 
