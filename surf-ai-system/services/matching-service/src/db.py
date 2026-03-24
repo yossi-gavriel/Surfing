@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,16 @@ from shared.utils.logger import get_logger
 from shared.utils.sqlite_store import SQLiteStore, load_json_records
 
 logger = get_logger("matching-db")
+
+
+@dataclass(frozen=True)
+class MatchWriteResult:
+    status: str
+    track_id: str
+    user_id: str
+    existing_user_id: str | None = None
+    score_delta: float | None = None
+    required_improvement: float | None = None
 
 
 class UsersDB:
@@ -37,12 +48,17 @@ class UsersDB:
                 )
                 """
             )
-            rows = conn.execute("PRAGMA table_info(users)").fetchall()
-            existing_columns = {row["name"] for row in rows}
-            if "role" not in existing_columns:
-                conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
-            if "pool_id" not in existing_columns:
-                conn.execute("ALTER TABLE users ADD COLUMN pool_id TEXT")
+            self.store.ensure_column(conn, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
+            self.store.ensure_column(conn, "users", "pool_id", "TEXT")
+            self.store.create_index_if_columns(
+                conn,
+                table_name="users",
+                required_columns=["pool_id", "user_id"],
+                create_sql="""
+                CREATE INDEX IF NOT EXISTS idx_users_pool_id
+                ON users(pool_id, user_id)
+                """,
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_embeddings (
@@ -55,10 +71,7 @@ class UsersDB:
                 )
                 """
             )
-            rows = conn.execute("PRAGMA table_info(user_embeddings)").fetchall()
-            existing_columns = {row["name"] for row in rows}
-            if "source_image_s3" not in existing_columns:
-                conn.execute("ALTER TABLE user_embeddings ADD COLUMN source_image_s3 TEXT")
+            self.store.ensure_column(conn, "user_embeddings", "source_image_s3", "TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_user_embeddings_user_id
@@ -255,21 +268,76 @@ class MatchesDB:
                     distance_max REAL NOT NULL,
                     second_best_score REAL,
                     score_margin REAL,
+                    best_similarity REAL,
+                    second_best_similarity REAL,
+                    margin REAL,
+                    threshold_used REAL,
+                    margin_threshold_used REAL,
+                    decision_reason TEXT,
+                    decision_explanation TEXT,
                     pool_id TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(user_id, track_id)
                 )
                 """
             )
-            rows = conn.execute("PRAGMA table_info(matches)").fetchall()
-            existing_columns = {row["name"] for row in rows}
-            if "pool_id" not in existing_columns:
-                conn.execute("ALTER TABLE matches ADD COLUMN pool_id TEXT")
+            self.store.ensure_column(conn, "matches", "camera_id", "TEXT")
+            self.store.ensure_column(conn, "matches", "video_id", "TEXT")
+            self.store.ensure_column(conn, "matches", "source_video_s3", "TEXT")
+            self.store.ensure_column(conn, "matches", "timestamp", "TEXT")
+            self.store.ensure_column(conn, "matches", "keyframe", "TEXT")
+            self.store.ensure_column(conn, "matches", "keyframe_s3", "TEXT")
+            self.store.ensure_column(conn, "matches", "second_best_score", "REAL")
+            self.store.ensure_column(conn, "matches", "score_margin", "REAL")
+            self.store.ensure_column(conn, "matches", "pool_id", "TEXT")
+            self.store.ensure_column(conn, "matches", "best_similarity", "REAL")
+            self.store.ensure_column(conn, "matches", "second_best_similarity", "REAL")
+            self.store.ensure_column(conn, "matches", "margin", "REAL")
+            self.store.ensure_column(conn, "matches", "threshold_used", "REAL")
+            self.store.ensure_column(conn, "matches", "margin_threshold_used", "REAL")
+            self.store.ensure_column(conn, "matches", "decision_reason", "TEXT")
+            self.store.ensure_column(conn, "matches", "decision_explanation", "TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_matches_user_created
                 ON matches(user_id, created_at DESC)
                 """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matches_track_id
+                ON matches(track_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_matches_track_id
+                ON matches(track_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matches_video_id
+                ON matches(video_id, created_at DESC)
+                """
+            )
+            self.store.create_index_if_columns(
+                conn,
+                table_name="matches",
+                required_columns=["pool_id", "track_id", "created_at"],
+                create_sql="""
+                CREATE INDEX IF NOT EXISTS idx_matches_pool_track
+                ON matches(pool_id, track_id, created_at DESC)
+                """,
+            )
+            self.store.create_index_if_columns(
+                conn,
+                table_name="matches",
+                required_columns=["pool_id", "video_id", "created_at"],
+                create_sql="""
+                CREATE INDEX IF NOT EXISTS idx_matches_pool_video
+                ON matches(pool_id, video_id, created_at DESC)
+                """,
             )
 
     def _migrate_legacy_matches(self) -> None:
@@ -290,8 +358,10 @@ class MatchesDB:
                             user_id, track_id, camera_id, video_id, source_video_s3,
                             timestamp, keyframe, keyframe_s3, score, confidence, distance,
                             embeddings_used, distance_mean, distance_std, distance_max,
-                            second_best_score, score_margin, pool_id, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            second_best_score, score_margin, best_similarity, second_best_similarity,
+                            margin, threshold_used, margin_threshold_used, decision_reason,
+                            decision_explanation, pool_id, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             match.get("user_id"),
@@ -311,6 +381,13 @@ class MatchesDB:
                             float(match.get("distance_max", 0.0)),
                             match.get("second_best_score"),
                             match.get("score_margin"),
+                            match.get("best_similarity", match.get("score")),
+                            match.get("second_best_similarity", match.get("second_best_score")),
+                            match.get("margin", match.get("score_margin")),
+                            match.get("threshold_used"),
+                            match.get("margin_threshold_used"),
+                            match.get("decision_reason"),
+                            match.get("decision_explanation"),
                             match.get("pool_id"),
                             match.get("created_at") or datetime.now(timezone.utc).isoformat(),
                         ),
@@ -320,55 +397,133 @@ class MatchesDB:
                 conn.rollback()
                 raise
 
-    def add_match(self, match: dict[str, Any]) -> bool:
+    def add_match(
+        self,
+        match: dict[str, Any],
+        *,
+        significant_improvement_margin: float = 0.05,
+    ) -> MatchWriteResult:
         with self.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 existing = conn.execute(
                     """
-                    SELECT 1
+                    SELECT
+                        id,
+                        user_id,
+                        COALESCE(best_similarity, score) AS best_similarity
                     FROM matches
-                    WHERE user_id = ? AND track_id = ?
+                    WHERE track_id = ?
+                    ORDER BY datetime(created_at) DESC, id DESC
+                    LIMIT 1
                     """,
-                    (match["user_id"], match["track_id"]),
+                    (match["track_id"],),
                 ).fetchone()
                 if existing:
-                    conn.rollback()
-                    return False
+                    existing_user_id = str(existing["user_id"])
+                    if existing_user_id == str(match["user_id"]):
+                        conn.rollback()
+                        return MatchWriteResult(
+                            status="duplicate",
+                            track_id=str(match["track_id"]),
+                            user_id=str(match["user_id"]),
+                            existing_user_id=existing_user_id,
+                        )
 
-                conn.execute(
-                    """
-                    INSERT INTO matches (
-                        user_id, track_id, camera_id, video_id, source_video_s3,
-                        timestamp, keyframe, keyframe_s3, score, confidence, distance,
-                        embeddings_used, distance_mean, distance_std, distance_max,
-                        second_best_score, score_margin, pool_id, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        match["user_id"],
-                        match["track_id"],
-                        match.get("camera_id"),
-                        match.get("video_id"),
-                        match.get("source_video_s3"),
-                        match.get("timestamp"),
-                        match.get("keyframe"),
-                        match.get("keyframe_s3"),
-                        float(match["score"]),
-                        float(match["confidence"]),
-                        float(match["distance"]),
-                        int(match["embeddings_used"]),
-                        float(match["distance_mean"]),
-                        float(match["distance_std"]),
-                        float(match["distance_max"]),
-                        match.get("second_best_score"),
-                        match.get("score_margin"),
-                        match.get("pool_id"),
-                        match.get("created_at") or datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
+                    existing_score = float(existing["best_similarity"] or 0.0)
+                    incoming_score = float(match.get("best_similarity", match["score"]))
+                    required_improvement = max(float(significant_improvement_margin), 0.03)
+                    score_delta = incoming_score - existing_score
+                    if score_delta < required_improvement:
+                        conn.rollback()
+                        return MatchWriteResult(
+                            status="retained_existing",
+                            track_id=str(match["track_id"]),
+                            user_id=str(match["user_id"]),
+                            existing_user_id=existing_user_id,
+                            score_delta=score_delta,
+                            required_improvement=required_improvement,
+                        )
+
+                    self._update_match_row(conn, row_id=int(existing["id"]), match=match)
+                    conn.commit()
+                    return MatchWriteResult(
+                        status="reassigned",
+                        track_id=str(match["track_id"]),
+                        user_id=str(match["user_id"]),
+                        existing_user_id=existing_user_id,
+                        score_delta=score_delta,
+                        required_improvement=required_improvement,
+                    )
+
+                self._insert_match_row(conn, match=match)
                 conn.commit()
-                return True
+                return MatchWriteResult(
+                    status="inserted",
+                    track_id=str(match["track_id"]),
+                    user_id=str(match["user_id"]),
+                )
             except Exception:
                 conn.rollback()
                 raise
+
+    def _insert_match_row(self, conn, *, match: dict[str, Any]) -> None:
+        conn.execute(
+            """
+            INSERT INTO matches (
+                user_id, track_id, camera_id, video_id, source_video_s3,
+                timestamp, keyframe, keyframe_s3, score, confidence, distance,
+                embeddings_used, distance_mean, distance_std, distance_max,
+                second_best_score, score_margin, best_similarity, second_best_similarity,
+                margin, threshold_used, margin_threshold_used, decision_reason,
+                decision_explanation, pool_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            self._match_row_values(match),
+        )
+
+    def _update_match_row(self, conn, *, row_id: int, match: dict[str, Any]) -> None:
+        values = self._match_row_values(match)
+        conn.execute(
+            """
+            UPDATE matches
+            SET user_id = ?, track_id = ?, camera_id = ?, video_id = ?, source_video_s3 = ?,
+                timestamp = ?, keyframe = ?, keyframe_s3 = ?, score = ?, confidence = ?, distance = ?,
+                embeddings_used = ?, distance_mean = ?, distance_std = ?, distance_max = ?,
+                second_best_score = ?, score_margin = ?, best_similarity = ?, second_best_similarity = ?,
+                margin = ?, threshold_used = ?, margin_threshold_used = ?, decision_reason = ?,
+                decision_explanation = ?, pool_id = ?, created_at = ?
+            WHERE id = ?
+            """,
+            (*values, row_id),
+        )
+
+    def _match_row_values(self, match: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            match["user_id"],
+            match["track_id"],
+            match.get("camera_id"),
+            match.get("video_id"),
+            match.get("source_video_s3"),
+            match.get("timestamp"),
+            match.get("keyframe"),
+            match.get("keyframe_s3"),
+            float(match["score"]),
+            float(match["confidence"]),
+            float(match["distance"]),
+            int(match["embeddings_used"]),
+            float(match["distance_mean"]),
+            float(match["distance_std"]),
+            float(match["distance_max"]),
+            match.get("second_best_score"),
+            match.get("score_margin"),
+            match.get("best_similarity", match["score"]),
+            match.get("second_best_similarity", match.get("second_best_score")),
+            match.get("margin", match.get("score_margin")),
+            match.get("threshold_used"),
+            match.get("margin_threshold_used"),
+            match.get("decision_reason"),
+            match.get("decision_explanation"),
+            match.get("pool_id"),
+            match.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        )

@@ -4,6 +4,7 @@ import { Component, inject } from '@angular/core';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 
 import { AuthService, MeResponse } from './core/auth.service';
+import { AppLanguage, I18nService } from './core/i18n.service';
 
 @Component({
   selector: 'app-root',
@@ -12,14 +13,40 @@ import { AuthService, MeResponse } from './core/auth.service';
   template: `
     <div class="shell">
       <header class="app-header">
-        <a routerLink="/my-videos" class="brand">Surf AI</a>
+        <a [routerLink]="homeRoute()" class="brand">Surf AI</a>
 
-        <nav *ngIf="auth.isAuthenticated()">
-          <a *ngIf="auth.isAdmin()" routerLink="/admin" routerLinkActive="active">Admin</a>
-          <a routerLink="/upload-face" routerLinkActive="active">My Profile</a>
-          <a routerLink="/my-videos" routerLinkActive="active">My Videos</a>
-          <button type="button" (click)="logout()">Log out</button>
-        </nav>
+        <div class="header-actions">
+          <div class="language-picker" role="group" aria-label="Language switcher">
+            <span class="language-label">🌐 {{ currentLanguageLabel() }}</span>
+
+            <div class="language-options">
+              <button
+                *ngFor="let language of i18n.availableLanguages"
+                type="button"
+                class="language-option"
+                [class.active]="i18n.getCurrentLanguage() === language.code"
+                [attr.aria-pressed]="i18n.getCurrentLanguage() === language.code"
+                (click)="setLanguage(language.code)"
+              >
+                <span class="flag">{{ language.flag }}</span>
+                <span>{{ language.label }}</span>
+              </button>
+            </div>
+          </div>
+
+          <nav *ngIf="auth.isAuthenticated()">
+            <a *ngIf="auth.isAdmin()" routerLink="/admin" routerLinkActive="active">
+              {{ i18n.t('nav.admin') }}
+            </a>
+            <a *ngIf="!auth.isAdmin()" routerLink="/upload-face" routerLinkActive="active">
+              {{ i18n.t('nav.myProfile') }}
+            </a>
+            <a *ngIf="!auth.isAdmin()" routerLink="/my-videos" routerLinkActive="active">
+              {{ i18n.t('nav.myVideos') }}
+            </a>
+            <button type="button" (click)="logout()">{{ i18n.t('nav.logOut') }}</button>
+          </nav>
+        </div>
       </header>
 
       <main class="container">
@@ -56,11 +83,78 @@ import { AuthService, MeResponse } from './core/auth.service';
       letter-spacing: 0.04em;
     }
 
+    .header-actions,
     nav {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.75rem;
       flex-wrap: wrap;
+    }
+
+    .header-actions {
+      justify-content: flex-end;
+    }
+
+    .language-picker {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.4rem 0.5rem 0.4rem 0.85rem;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(20, 60, 68, 0.12);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    }
+
+    .language-label {
+      color: var(--ink-soft);
+      font-size: 0.92rem;
+      white-space: nowrap;
+    }
+
+    .language-options {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem;
+      border-radius: 999px;
+      background: rgba(20, 82, 96, 0.06);
+    }
+
+    .language-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      border: none;
+      border-radius: 999px;
+      padding: 0.55rem 0.85rem;
+      background: transparent;
+      color: var(--ink-soft);
+      font: inherit;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+    }
+
+    .language-option:hover {
+      background: rgba(20, 82, 96, 0.08);
+      color: var(--ink-strong);
+    }
+
+    .language-option.active {
+      background: linear-gradient(135deg, var(--accent-deep), var(--accent));
+      color: white;
+      box-shadow: 0 10px 24px rgba(20, 82, 96, 0.22);
+    }
+
+    .language-option.active:hover {
+      transform: translateY(-1px);
+    }
+
+    .flag {
+      font-size: 1rem;
+      line-height: 1;
     }
 
     nav a,
@@ -93,11 +187,28 @@ import { AuthService, MeResponse } from './core/auth.service';
         align-items: start;
         flex-direction: column;
       }
+
+      .header-actions {
+        width: 100%;
+        justify-content: space-between;
+        align-items: stretch;
+      }
+
+      .language-picker {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .language-options {
+        flex: 1;
+        justify-content: center;
+      }
     }
   `],
 })
 export class AppComponent {
   protected readonly auth = inject(AuthService);
+  protected readonly i18n = inject(I18nService);
   private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
 
@@ -113,6 +224,22 @@ export class AppComponent {
           },
         });
     }
+  }
+
+  setLanguage(language: AppLanguage): void {
+    this.i18n.setLanguage(language);
+  }
+
+  currentLanguageLabel(): string {
+    const current = this.i18n.availableLanguages.find(
+      (language) => language.code === this.i18n.getCurrentLanguage(),
+    );
+
+    return current ? `${current.flag} ${current.label}` : this.i18n.t('language.label');
+  }
+
+  homeRoute(): string {
+    return this.auth.isAdmin() ? '/admin' : '/my-videos';
   }
 
   logout(): void {

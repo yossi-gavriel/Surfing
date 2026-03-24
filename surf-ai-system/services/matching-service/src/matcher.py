@@ -3,8 +3,14 @@ from typing import Any
 
 import numpy as np
 
-from shared.utils.embeddings import pairwise_cosine_similarity, pairwise_euclidean_distances
 from shared.utils.logger import get_logger
+from shared.utils.match_decision import (
+    CandidateScore,
+    MatchDecision,
+    evaluate_match_decision,
+    evaluate_track_match,
+)
+from shared.utils.system_config import SystemConfigService
 from src.config import MatchingConfig
 from src.db import UsersDB, normalize_embeddings
 
@@ -34,437 +40,259 @@ class MatchResult:
     second_best_score: float | None
     score_margin: float | None
     force_match_used: bool
+    threshold_used: float
+    margin_threshold_used: float
+    decision_reason: str | None
+    decision_explanation: str
 
 
 @dataclass
-class CandidateScore:
-    user_id: str
-    best_user_embedding_id: str | None
-    aggregated_distance: float
-    best_similarity: float
-    mean_distance: float
-    max_distance: float
-    distance_std: float
-    per_embedding_distances: list[float]
-    final_score: float
-    passes_consistency: bool
+class MatchAttempt:
+    match_result: MatchResult | None
+    decision: MatchDecision
+    track_id: str | None
+    best_user_id: str | None
+
+
+class ExactTrackEmbeddingSearchEngine:
+    def search(
+        self,
+        *,
+        track_embedding: np.ndarray,
+        users: list[dict[str, Any]],
+        score_candidate,
+    ) -> list[CandidateScore]:
+        ranked_scores = [score_candidate(user=user) for user in users]
+        ranked_scores.sort(
+            key=lambda candidate: (
+                candidate.best_similarity,
+                candidate.final_score,
+                -candidate.aggregated_distance,
+            ),
+            reverse=True,
+        )
+        return ranked_scores
 
 
 class Matcher:
-    def __init__(self, users_db: UsersDB, config: MatchingConfig):
+    def __init__(
+        self,
+        users_db: UsersDB,
+        config: MatchingConfig,
+        system_config: SystemConfigService | None = None,
+        *,
+        search_backend: ExactTrackEmbeddingSearchEngine | None = None,
+    ):
         self.users_db = users_db
         self.config = config
+        self.system_config = system_config
+        self.search_engine = search_backend or ExactTrackEmbeddingSearchEngine()
 
-    def match(self, payload: dict[str, Any]) -> MatchResult | None:
-        users = self.users_db.get_all_users(pool_id=payload.get("pool_id"))
+    def match(
+        self,
+        payload: dict[str, Any],
+        *,
+        candidate_users: list[dict[str, Any]] | None = None,
+    ) -> MatchResult | None:
+        return self.evaluate_match(payload, candidate_users=candidate_users).match_result
+
+    def evaluate_match(
+        self,
+        payload: dict[str, Any],
+        *,
+        candidate_users: list[dict[str, Any]] | None = None,
+    ) -> MatchAttempt:
+        users = candidate_users or self.users_db.get_all_users(pool_id=payload.get("pool_id"))
         if not users:
             logger.warning("No users available for matching")
-            return None
+            return MatchAttempt(
+                match_result=None,
+                decision=evaluate_match_decision(
+                    best_similarity=None,
+                    second_best_similarity=None,
+                    similarity_threshold=self._min_similarity(),
+                    margin_threshold=self._min_margin(),
+                ),
+                track_id=payload.get("track_id"),
+                best_user_id=None,
+            )
 
-        track_embeddings = self._extract_track_embeddings(payload)
-        if track_embeddings.size == 0:
-            raise ValueError("empty embedding payload")
-
-        evidence_count = self._get_track_evidence_count(payload, track_embeddings)
+        track_embedding = self._extract_track_embedding(payload)
+        evidence_count = self._get_track_evidence_count(payload)
         payload_consistency = self._get_payload_consistency(payload)
-        validation_error = self._get_track_evidence_validation_error(
+        quality_avg = self._get_quality_avg(payload)
+        validation_error = self._get_track_validation_error(
             evidence_count=evidence_count,
-            track_embeddings=track_embeddings,
             payload_consistency=payload_consistency,
         )
         if validation_error is not None:
-            track_embedding = self._aggregate_track_embeddings(track_embeddings)
-            ranked_candidates = self._rank_candidates(
-                users=users,
-                track_embedding=track_embedding,
-                track_embeddings=track_embeddings,
-                evidence_count=evidence_count,
-                payload_consistency=payload_consistency,
-            )
-            if not ranked_candidates:
-                self._log_single_embedding_debug(
-                    payload=payload,
-                    users=users,
-                    track_embeddings=track_embeddings,
-                    evidence_count=evidence_count,
-                    payload_consistency=payload_consistency,
-                )
-                raise ValueError(validation_error)
+            raise ValueError(validation_error)
 
-            best_candidate = ranked_candidates[0]
-            force_match = self._should_force_match(best_candidate)
-            logger.info(
-                {
-                    "track_id": payload.get("track_id"),
-                    "frames": evidence_count,
-                    "valid_frames": len(track_embeddings),
-                    "best_similarity": best_candidate.best_similarity,
-                    "force_match": force_match,
-                }
-            )
-            if not force_match:
-                self._log_single_embedding_debug(
-                    payload=payload,
-                    users=users,
-                    track_embeddings=track_embeddings,
-                    evidence_count=evidence_count,
-                    payload_consistency=payload_consistency,
-                    ranked_candidates=ranked_candidates,
-                )
-                raise ValueError(validation_error)
+        logger.info(
+            "Matching start track_id=%s pool_id=%s candidates=%s evidence_count=%s quality_avg=%s consistency=%s",
+            payload.get("track_id"),
+            payload.get("pool_id"),
+            len(users),
+            evidence_count,
+            "n/a" if quality_avg is None else f"{quality_avg:.4f}",
+            "n/a" if payload_consistency is None else f"{payload_consistency:.4f}",
+        )
 
-            return self._build_match_result(
-                payload=payload,
-                best_candidate=best_candidate,
-                second_best_candidate=ranked_candidates[1] if len(ranked_candidates) > 1 else None,
-                embeddings_used=len(track_embeddings),
-                evidence_count=evidence_count,
-                payload_consistency=payload_consistency,
-                force_match_used=True,
-            )
-
-        track_embedding = self._aggregate_track_embeddings(track_embeddings)
-        ranked_candidates = self._rank_candidates(
-            users=users,
+        evaluation = evaluate_track_match(
             track_embedding=track_embedding,
-            track_embeddings=track_embeddings,
+            users=users,
+            similarity_threshold=self._min_similarity(),
+            margin_threshold=self._min_margin(),
+            min_track_embeddings=self._min_track_embeddings(),
+            min_track_consistency=self.config.min_track_consistency,
             evidence_count=evidence_count,
             payload_consistency=payload_consistency,
+            quality_avg=quality_avg,
         )
-
+        ranked_candidates = evaluation.ranked_candidates
         if not ranked_candidates:
-            return None
+            return MatchAttempt(
+                match_result=None,
+                decision=evaluation.decision,
+                track_id=payload.get("track_id"),
+                best_user_id=None,
+            )
 
-        best_candidate = ranked_candidates[0]
-        second_best_candidate = ranked_candidates[1] if len(ranked_candidates) > 1 else None
-        score_margin = self._get_score_margin(best_candidate, second_best_candidate)
-        original_decision, rejection_reason = self._decide_match(
-            best_candidate=best_candidate,
-            second_best_candidate=second_best_candidate,
-            score_margin=score_margin,
-        )
-        force_match = self._should_force_match(best_candidate) if not original_decision else False
-        decision = original_decision or force_match
+        best_candidate = evaluation.best_candidate
+        second_best_candidate = evaluation.second_best_candidate
+        assert best_candidate is not None
+        decision = evaluation.decision
 
         logger.info(
-            "Decision for track_id=%s user_id=%s best_score=%.4f second_best_score=%s margin=%s decision=%s",
+            "Decision for track_id=%s user_id=%s best_similarity=%s second_best_similarity=%s margin=%s threshold_used=%.4f margin_threshold_used=%.4f decision=%s reason=%s",
             payload.get("track_id"),
             best_candidate.user_id,
-            best_candidate.final_score,
-            "n/a" if second_best_candidate is None else f"{second_best_candidate.final_score:.4f}",
-            "n/a" if score_margin is None else f"{score_margin:.4f}",
-            "accepted-force-match" if force_match else "accepted" if decision else f"rejected ({rejection_reason})",
-        )
-        logger.info(
-            {
-                "track_id": payload.get("track_id"),
-                "frames": evidence_count,
-                "valid_frames": len(track_embeddings),
-                "best_similarity": best_candidate.best_similarity,
-                "force_match": force_match,
-            }
+            "n/a" if decision.best_similarity is None else f"{decision.best_similarity:.4f}",
+            "n/a" if second_best_candidate is None else f"{second_best_candidate.best_similarity:.4f}",
+            "n/a" if decision.margin is None else f"{decision.margin:.4f}",
+            decision.threshold_used,
+            decision.margin_threshold_used,
+            "accepted" if decision.final_verdict == "match" else f"rejected ({decision.decision_reason})",
+            decision.decision_reason or "accepted",
         )
 
-        if not decision:
+        if decision.final_verdict != "match":
             self._print_rejected_match(
                 payload=payload,
                 candidate=best_candidate,
+                decision=decision,
             )
-            if rejection_reason == "consistency":
-                self._log_single_embedding_debug(
-                    payload=payload,
-                    users=users,
-                    track_embeddings=track_embeddings,
-                    evidence_count=evidence_count,
-                    payload_consistency=payload_consistency,
-                    ranked_candidates=ranked_candidates,
-                )
-            logger.info(
-                "Rejected track_id=%s user_id=%s "
-                "(distance=%.4f mean=%.4f max=%.4f std=%.4f score=%.4f embeddings_used=%d evidence_count=%d payload_consistency=%s)",
-                payload.get("track_id"),
-                best_candidate.user_id,
-                best_candidate.aggregated_distance,
-                best_candidate.mean_distance,
-                best_candidate.max_distance,
-                best_candidate.distance_std,
-                best_candidate.final_score,
-                len(track_embeddings),
-                evidence_count,
-                "n/a" if payload_consistency is None else f"{payload_consistency:.4f}",
+            return MatchAttempt(
+                match_result=None,
+                decision=decision,
+                track_id=payload.get("track_id"),
+                best_user_id=best_candidate.user_id,
             )
-            return None
 
-        return self._build_match_result(
+        match_result = self._build_match_result(
             payload=payload,
             best_candidate=best_candidate,
             second_best_candidate=second_best_candidate,
-            embeddings_used=len(track_embeddings),
             evidence_count=evidence_count,
             payload_consistency=payload_consistency,
-            force_match_used=force_match,
+            force_match_used=False,
+            decision=decision,
+        )
+        return MatchAttempt(
+            match_result=match_result,
+            decision=decision,
+            track_id=payload.get("track_id"),
+            best_user_id=best_candidate.user_id,
         )
 
-    def _extract_track_embeddings(self, payload: dict[str, Any]) -> np.ndarray:
-        raw_embeddings = payload.get("embeddings")
-        if raw_embeddings is None:
-            raw_embeddings = payload.get("embedding")
-        if raw_embeddings is None:
-            raw_embeddings = payload.get("face_embedding")
+    def _extract_track_embedding(self, payload: dict[str, Any]) -> np.ndarray:
+        raw_embedding = (
+            payload.get("track_embedding")
+            or payload.get("face_embedding")
+            or payload.get("embedding")
+            or payload.get("embeddings")
+        )
+        normalized = normalize_embeddings(raw_embedding)
+        if normalized.size == 0:
+            raise ValueError("empty embedding payload")
+        if len(normalized) == 1:
+            return normalized[0]
 
-        return normalize_embeddings(raw_embeddings)
+        aggregated = np.mean(normalized, axis=0)
+        normalized_aggregated = normalize_embeddings(aggregated)
+        if normalized_aggregated.size == 0:
+            raise ValueError("track embedding could not be normalized")
+        return normalized_aggregated[0]
 
-    def _get_track_evidence_count(
-        self,
-        payload: dict[str, Any],
-        track_embeddings: np.ndarray,
-    ) -> int:
-        reported_count = payload.get("num_faces_detected")
-        if reported_count is None:
-            reported_count = payload.get("num_embeddings")
-
-        if reported_count is None:
-            return len(track_embeddings)
-
-        try:
-            return max(int(reported_count), len(track_embeddings))
-        except (TypeError, ValueError):
-            return len(track_embeddings)
+    def _get_track_evidence_count(self, payload: dict[str, Any]) -> int:
+        for key in ("frames_count", "num_faces_detected", "num_embeddings"):
+            raw_value = payload.get(key)
+            if raw_value is None:
+                continue
+            try:
+                return max(int(raw_value), 0)
+            except (TypeError, ValueError):
+                continue
+        return 0
 
     def _get_payload_consistency(self, payload: dict[str, Any]) -> float | None:
         raw_value = payload.get("consistency")
         if raw_value is None:
             return None
-
         try:
             return float(raw_value)
         except (TypeError, ValueError):
             return None
 
-    def _get_track_evidence_validation_error(
+    def _get_quality_avg(self, payload: dict[str, Any]) -> float | None:
+        raw_value = payload.get("quality_avg")
+        if raw_value is None:
+            raw_value = payload.get("avg_quality")
+        if raw_value is None:
+            return None
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_track_validation_error(
         self,
+        *,
         evidence_count: int,
-        track_embeddings: np.ndarray,
         payload_consistency: float | None,
     ) -> str | None:
-        if len(track_embeddings) >= self.config.min_track_embeddings:
-            return None
-
-        if evidence_count >= self.config.min_track_embeddings:
-            if payload_consistency is None:
-                return "track has aggregated embedding without consistency metadata"
-            if payload_consistency < self.config.min_track_consistency:
-                return "track consistency below minimum threshold"
-            return None
-
-        if len(track_embeddings) < 2:
-            return "single-embedding tracks are not eligible for matching"
-
+        runtime_min_frames = self._min_track_embeddings()
+        if evidence_count < runtime_min_frames:
+            return "track has fewer than minimum supported frames"
+        if payload_consistency is not None and payload_consistency < self.config.min_track_consistency:
+            return "track consistency below minimum threshold"
         return None
-
-    def _aggregate_track_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
-        aggregated = np.mean(embeddings, axis=0)
-        normalized = normalize_embeddings(aggregated)
-        if normalized.size == 0:
-            raise ValueError("track embedding could not be normalized")
-        return normalized
-
-    def _rank_candidates(
-        self,
-        users: list[dict[str, Any]],
-        track_embedding: np.ndarray,
-        track_embeddings: np.ndarray,
-        evidence_count: int,
-        payload_consistency: float | None,
-    ) -> list[CandidateScore]:
-        ranked_scores: list[CandidateScore] = []
-
-        for user in users:
-            score = self._score_candidate(
-                user=user,
-                track_embedding=track_embedding,
-                track_embeddings=track_embeddings,
-                evidence_count=evidence_count,
-                payload_consistency=payload_consistency,
-            )
-            ranked_scores.append(score)
-
-        ranked_scores.sort(key=lambda candidate: candidate.final_score, reverse=True)
-        return ranked_scores
-
-    def _normalize_score(self, raw_score: float) -> float:
-        return float(np.clip(raw_score, 0.0, 1.0))
-
-    def _score_candidate(
-        self,
-        user: dict[str, Any],
-        track_embedding: np.ndarray,
-        track_embeddings: np.ndarray,
-        evidence_count: int,
-        payload_consistency: float | None,
-    ) -> CandidateScore:
-        aggregated_distances = pairwise_euclidean_distances(user["embeddings"], track_embedding)
-        aggregated_similarities = pairwise_cosine_similarity(user["embeddings"], track_embedding)
-        aggregated_distance_index = int(np.argmin(aggregated_distances))
-        aggregated_distance = float(aggregated_distances.reshape(-1)[aggregated_distance_index])
-        best_similarity = float(aggregated_similarities.reshape(-1)[aggregated_distance_index])
-        best_user_embedding_id = None
-        if user.get("embedding_ids"):
-            best_user_embedding_id = user["embedding_ids"][aggregated_distance_index]
-
-        per_embedding_distances = pairwise_euclidean_distances(
-            track_embeddings,
-            user["embeddings"],
-        ).min(axis=1)
-
-        mean_distance = float(np.mean(per_embedding_distances))
-        distance_std = float(np.std(per_embedding_distances))
-        max_distance = float(np.max(per_embedding_distances))
-        raw_score = ((1.0 - aggregated_distance) * 0.6) + ((1.0 - mean_distance) * 0.3) - (distance_std * 0.1)
-        final_score = self._normalize_score(raw_score)
-        passes_consistency = self._is_consistent_match(
-            track_embeddings=track_embeddings,
-            candidate_score=CandidateScore(
-                user_id=user["user_id"],
-                best_user_embedding_id=best_user_embedding_id,
-                aggregated_distance=aggregated_distance,
-                best_similarity=best_similarity,
-                mean_distance=mean_distance,
-                max_distance=max_distance,
-                distance_std=distance_std,
-                per_embedding_distances=per_embedding_distances.astype(float).tolist(),
-                final_score=final_score,
-                passes_consistency=False,
-            ),
-            evidence_count=evidence_count,
-            payload_consistency=payload_consistency,
-        )
-
-        return CandidateScore(
-            user_id=user["user_id"],
-            best_user_embedding_id=best_user_embedding_id,
-            aggregated_distance=aggregated_distance,
-            best_similarity=best_similarity,
-            mean_distance=mean_distance,
-            max_distance=max_distance,
-            distance_std=distance_std,
-            per_embedding_distances=per_embedding_distances.astype(float).tolist(),
-            final_score=final_score,
-            passes_consistency=passes_consistency,
-        )
-
-    def _is_consistent_match(
-        self,
-        track_embeddings: np.ndarray,
-        candidate_score: CandidateScore,
-        evidence_count: int,
-        payload_consistency: float | None,
-    ) -> bool:
-        if candidate_score.aggregated_distance > self.config.match_threshold:
-            return False
-
-        if len(track_embeddings) >= 2:
-            if candidate_score.mean_distance > self.config.match_threshold:
-                return False
-            if candidate_score.max_distance > self.config.match_threshold:
-                return False
-            if candidate_score.distance_std > self.config.max_distance_std:
-                return False
-            return True
-
-        if evidence_count >= self.config.min_track_embeddings:
-            return (
-                payload_consistency is not None
-                and payload_consistency >= self.config.min_track_consistency
-            )
-
-        return False
-
-    def _get_score_margin(
-        self,
-        best_candidate: CandidateScore,
-        second_best_candidate: CandidateScore | None,
-    ) -> float | None:
-        if second_best_candidate is None:
-            return None
-        return best_candidate.final_score - second_best_candidate.final_score
-
-    def _decide_match(
-        self,
-        best_candidate: CandidateScore,
-        second_best_candidate: CandidateScore | None,
-        score_margin: float | None,
-    ) -> tuple[bool, str | None]:
-        if not best_candidate.passes_consistency:
-            return False, "consistency"
-        if best_candidate.final_score < self.config.min_score:
-            return False, "min_score"
-        if second_best_candidate is not None and score_margin is not None and score_margin < self.config.margin:
-            return False, "margin"
-        return True, None
 
     def _print_rejected_match(
         self,
         *,
         payload: dict[str, Any],
         candidate: CandidateScore,
+        decision: MatchDecision,
     ) -> None:
         print(
             {
                 "video_embedding_id": payload.get("video_embedding_id") or payload.get("track_id"),
                 "user_embedding_id": candidate.best_user_embedding_id,
                 "distance": candidate.aggregated_distance,
-                "threshold": self.config.match_threshold,
+                "similarity": candidate.best_similarity,
+                "second_best_similarity": decision.second_best_similarity,
+                "margin": decision.margin,
+                "threshold": decision.threshold_used,
+                "margin_threshold": decision.margin_threshold_used,
+                "rejection_reason": decision.decision_reason,
+                "explanation": decision.explanation,
                 "decision": "rejected",
             }
         )
 
-    def _log_single_embedding_debug(
-        self,
-        *,
-        payload: dict[str, Any],
-        users: list[dict[str, Any]],
-        track_embeddings: np.ndarray,
-        evidence_count: int,
-        payload_consistency: float | None,
-        ranked_candidates: list[CandidateScore] | None = None,
-    ) -> None:
-        if not self.config.allow_single_embedding_debug or len(track_embeddings) != 1 or not users:
-            return
-
-        if ranked_candidates is None:
-            track_embedding = self._aggregate_track_embeddings(track_embeddings)
-            ranked_candidates = self._rank_candidates(
-                users=users,
-                track_embedding=track_embedding,
-                track_embeddings=track_embeddings,
-                evidence_count=evidence_count,
-                payload_consistency=payload_consistency,
-            )
-
-        if not ranked_candidates:
-            return
-
-        best_candidate = ranked_candidates[0]
-        second_best_candidate = ranked_candidates[1] if len(ranked_candidates) > 1 else None
-        score_margin = self._get_score_margin(best_candidate, second_best_candidate)
-        would_match = (
-            best_candidate.aggregated_distance <= self.config.match_threshold
-            and best_candidate.final_score >= self.config.min_score
-            and (
-                second_best_candidate is None
-                or score_margin is None
-                or score_margin >= self.config.margin
-            )
-        )
-        if would_match:
-            print("Would have matched if single embedding was allowed")
-
     def _should_force_match(self, candidate: CandidateScore) -> bool:
-        return (
-            candidate.best_similarity > 0.82
-            and candidate.aggregated_distance < self.config.match_threshold
-        )
+        return False
 
     def _build_match_result(
         self,
@@ -472,12 +300,11 @@ class Matcher:
         payload: dict[str, Any],
         best_candidate: CandidateScore,
         second_best_candidate: CandidateScore | None,
-        embeddings_used: int,
         evidence_count: int,
         payload_consistency: float | None,
         force_match_used: bool,
+        decision: MatchDecision,
     ) -> MatchResult:
-        score_margin = self._get_score_margin(best_candidate, second_best_candidate)
         confidence = max(0.0, min(1.0, 1.0 - best_candidate.aggregated_distance))
         return MatchResult(
             user_id=best_candidate.user_id,
@@ -489,18 +316,22 @@ class Matcher:
             timestamp=self._get_timestamp(payload),
             keyframe=self._get_keyframe(payload),
             keyframe_s3=payload.get("keyframe_s3") or payload.get("keyframe"),
-            score=best_candidate.final_score,
+            score=best_candidate.best_similarity,
             confidence=confidence,
             min_distance=best_candidate.aggregated_distance,
             mean_distance=best_candidate.mean_distance,
             max_distance=best_candidate.max_distance,
             distance_std=best_candidate.distance_std,
-            embeddings_used=embeddings_used,
+            embeddings_used=1,
             track_evidence_count=evidence_count,
             payload_consistency=payload_consistency,
-            second_best_score=None if second_best_candidate is None else second_best_candidate.final_score,
-            score_margin=score_margin,
+            second_best_score=None if second_best_candidate is None else second_best_candidate.best_similarity,
+            score_margin=decision.margin,
             force_match_used=force_match_used,
+            threshold_used=decision.threshold_used,
+            margin_threshold_used=decision.margin_threshold_used,
+            decision_reason=decision.decision_reason,
+            decision_explanation=decision.explanation,
         )
 
     def _get_video_id(self, payload: dict[str, Any]) -> str | None:
@@ -511,3 +342,33 @@ class Matcher:
 
     def _get_keyframe(self, payload: dict[str, Any]) -> str | None:
         return payload.get("keyframe") or payload.get("keyframe_s3")
+
+    def _min_similarity(self) -> float:
+        if self.system_config is None:
+            return float(self.config.min_similarity)
+        return float(
+            self.system_config.get_config(
+                "min_similarity",
+                self.config.min_similarity,
+            )
+        )
+
+    def _min_margin(self) -> float:
+        if self.system_config is None:
+            return float(self.config.min_margin)
+        return float(
+            self.system_config.get_config(
+                "min_margin",
+                self.config.min_margin,
+            )
+        )
+
+    def _min_track_embeddings(self) -> int:
+        if self.system_config is None:
+            return int(self.config.min_track_embeddings)
+        return int(
+            self.system_config.get_config(
+                "min_frames_per_track",
+                self.config.min_track_embeddings,
+            )
+        )

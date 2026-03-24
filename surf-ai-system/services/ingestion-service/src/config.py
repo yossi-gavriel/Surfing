@@ -10,6 +10,8 @@ class IngestionConfig:
         self.chunk_duration = int(os.environ.get("CHUNK_DURATION", "10"))
         self.sqlite_db_path = os.environ.get("SQLITE_DB_PATH", "/app/data/surf_ai.db")
         self.camera_poll_interval = int(os.environ.get("CAMERA_POLL_INTERVAL", "10"))
+        self.worker_lease_ttl_seconds = int(os.environ.get("INGESTION_LEASE_TTL_SECONDS", "60"))
+        self.metrics_log_interval = int(os.environ.get("INGESTION_METRICS_LOG_INTERVAL", "25"))
         
         if not self.s3_bucket:
             raise ValueError("S3_BUCKET environment variable is required")

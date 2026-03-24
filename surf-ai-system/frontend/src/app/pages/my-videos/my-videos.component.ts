@@ -3,7 +3,8 @@ import { HttpClient } from '@angular/common/http';
 import { Component, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
 
-import { AuthService } from '../../core/auth.service';
+import { AuthService, MeResponse } from '../../core/auth.service';
+import { I18nService } from '../../core/i18n.service';
 
 interface VideoMatch {
   track_id: string;
@@ -14,6 +15,7 @@ interface VideoMatch {
   score: number;
   download_url: string | null;
   preview_url: string | null;
+  source_video_url?: string | null;
 }
 
 @Component({
@@ -23,48 +25,67 @@ interface VideoMatch {
   template: `
     <section class="page-header">
       <div>
-        <p class="eyebrow">Matched clips</p>
-        <h2>My videos</h2>
-        <p class="subcopy">Every confirmed appearance from the matches database, ready to review.</p>
+        <p class="eyebrow">{{ i18n.t('myVideos.eyebrow') }}</p>
+        <h2>{{ i18n.t('myVideos.title') }}</h2>
+        <p class="subcopy">{{ i18n.t('myVideos.subtitle') }}</p>
       </div>
-      <button (click)="loadVideos()" [disabled]="loading()">{{ loading() ? 'Refreshing...' : 'Refresh' }}</button>
+      <button (click)="loadVideos()" [disabled]="loading()">
+        {{ loading() ? i18n.t('common.refreshing') : i18n.t('common.refresh') }}
+      </button>
     </section>
 
-    <section class="state-card" *ngIf="loading()">Loading matched videos...</section>
+    <section class="state-card" *ngIf="loading()">{{ i18n.t('myVideos.loading') }}</section>
     <section class="state-card error" *ngIf="errorMessage()">{{ errorMessage() }}</section>
     <section class="state-card" *ngIf="!loading() && !errorMessage() && videos().length === 0">
-      No matches yet. Upload a face or check back after more videos are processed.
+      {{ i18n.t('myVideos.empty') }}
     </section>
 
     <section class="videos-grid" *ngIf="videos().length > 0">
       <article class="video-card" *ngFor="let video of videos()">
-        <img *ngIf="video.keyframe; else placeholder" [src]="video.keyframe" alt="Video keyframe" />
+        <video *ngIf="video.preview_url; else previewImage" [src]="video.preview_url" controls muted playsinline preload="metadata"></video>
+        <ng-template #previewImage>
+          <img *ngIf="video.keyframe; else placeholder" [src]="video.keyframe" alt="Video keyframe" />
+        </ng-template>
         <ng-template #placeholder>
-          <div class="placeholder">No keyframe available</div>
+          <div class="placeholder">{{ i18n.t('myVideos.noKeyframe') }}</div>
         </ng-template>
 
         <div class="card-body">
           <div class="card-meta">
-            <span class="pill">{{ video.video_id || 'Unknown video' }}</span>
+            <span class="pill">{{ video.video_id || i18n.t('myVideos.unknownVideo') }}</span>
             <span class="timestamp">{{ formatTimestamp(video.timestamp) }}</span>
           </div>
 
           <div class="scores">
             <div>
               <strong>{{ (video.confidence * 100).toFixed(0) }}%</strong>
-              <span>confidence</span>
+              <span>{{ i18n.t('myVideos.confidence') }}</span>
             </div>
             <div>
               <strong>{{ (video.score * 100).toFixed(0) }}%</strong>
-              <span>score</span>
+              <span>{{ i18n.t('myVideos.score') }}</span>
             </div>
           </div>
 
           <div class="actions">
-            <a class="button" [href]="video.download_url || video.preview_url || video.keyframe || '#'" target="_blank" rel="noopener">
-              Download
+            <a
+              class="button"
+              [href]="video.download_url || video.preview_url || video.keyframe || '#'"
+              target="_blank"
+              rel="noopener"
+            >
+              {{ i18n.t('common.download') }}
             </a>
-            <span class="track">Track {{ video.track_id }}</span>
+            <a
+              *ngIf="video.source_video_url"
+              class="secondary-link"
+              [href]="video.source_video_url"
+              target="_blank"
+              rel="noopener"
+            >
+              {{ i18n.t('myVideos.openSource') }}
+            </a>
+            <span class="track">{{ i18n.t('myVideos.track', { trackId: video.track_id }) }}</span>
           </div>
         </div>
       </article>
@@ -143,6 +164,7 @@ interface VideoMatch {
     }
 
     img,
+    video,
     .placeholder {
       width: 100%;
       height: 220px;
@@ -203,9 +225,14 @@ interface VideoMatch {
     }
 
     .scores span,
-    .track {
+    .track,
+    .secondary-link {
       color: var(--ink-soft);
       font-size: 0.85rem;
+    }
+
+    .secondary-link {
+      text-decoration: none;
     }
 
     .actions {
@@ -229,13 +256,31 @@ export class MyVideosComponent {
   private readonly http = inject(HttpClient);
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  protected readonly i18n = inject(I18nService);
 
   readonly videos = signal<VideoMatch[]>([]);
   readonly loading = signal(false);
   readonly errorMessage = signal('');
 
   constructor() {
+    this.loadProfile();
     this.loadVideos();
+  }
+
+  loadProfile(): void {
+    this.http
+      .get<MeResponse>('/api/me', {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (profile) => this.auth.setProfile(profile),
+        error: (error) => {
+          if (error.status === 401) {
+            this.auth.clearSession();
+            this.router.navigate(['/login']);
+          }
+        },
+      });
   }
 
   loadVideos(): void {
@@ -253,7 +298,7 @@ export class MyVideosComponent {
         },
         error: (error) => {
           this.loading.set(false);
-          this.errorMessage.set(error.error?.detail || 'Unable to load videos right now.');
+          this.errorMessage.set(this.i18n.translateApiMessage(error.error?.detail, 'myVideos.loadFailed'));
           if (error.status === 401) {
             this.auth.clearSession();
             this.router.navigate(['/login']);
@@ -263,11 +308,6 @@ export class MyVideosComponent {
   }
 
   formatTimestamp(timestamp: string | null): string {
-    if (!timestamp) {
-      return 'Timestamp unavailable';
-    }
-
-    const date = new Date(timestamp);
-    return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
+    return this.i18n.formatDateTime(timestamp);
   }
 }

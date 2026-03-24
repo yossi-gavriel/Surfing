@@ -28,12 +28,14 @@ export class AuthService {
   private readonly emailKey = 'surf-ai-email';
   private readonly roleKey = 'surf-ai-role';
   private readonly poolIdKey = 'surf-ai-pool-id';
+  private readonly selectedPoolIdKey = 'surf-ai-selected-pool-id';
 
   readonly token = signal<string | null>(localStorage.getItem(this.tokenKey));
   readonly userId = signal<string | null>(localStorage.getItem(this.userIdKey));
   readonly email = signal<string | null>(localStorage.getItem(this.emailKey));
   readonly role = signal<'admin' | 'user' | null>((localStorage.getItem(this.roleKey) as 'admin' | 'user' | null) ?? null);
   readonly poolId = signal<string | null>(localStorage.getItem(this.poolIdKey));
+  readonly selectedPoolId = signal<string | null>(localStorage.getItem(this.selectedPoolIdKey) ?? localStorage.getItem(this.poolIdKey));
 
   setSession(response: AuthResponse): void {
     localStorage.setItem(this.tokenKey, response.token);
@@ -50,6 +52,7 @@ export class AuthService {
       } else {
         localStorage.setItem(this.poolIdKey, response.pool_id);
       }
+      this.setSelectedPoolId(response.pool_id);
     }
     this.token.set(response.token);
     this.userId.set(response.user_id);
@@ -69,10 +72,22 @@ export class AuthService {
     } else {
       localStorage.setItem(this.poolIdKey, profile.pool_id);
     }
+    this.setSelectedPoolId(profile.pool_id);
     this.userId.set(profile.user_id);
     this.email.set(profile.email);
     this.role.set(profile.role);
     this.poolId.set(profile.pool_id);
+  }
+
+  setSelectedPoolId(poolId: string | null): void {
+    if (poolId === null || poolId === '') {
+      localStorage.removeItem(this.selectedPoolIdKey);
+      this.selectedPoolId.set(null);
+      return;
+    }
+
+    localStorage.setItem(this.selectedPoolIdKey, poolId);
+    this.selectedPoolId.set(poolId);
   }
 
   clearSession(): void {
@@ -81,11 +96,13 @@ export class AuthService {
     localStorage.removeItem(this.emailKey);
     localStorage.removeItem(this.roleKey);
     localStorage.removeItem(this.poolIdKey);
+    localStorage.removeItem(this.selectedPoolIdKey);
     this.token.set(null);
     this.userId.set(null);
     this.email.set(null);
     this.role.set(null);
     this.poolId.set(null);
+    this.selectedPoolId.set(null);
   }
 
   isAuthenticated(): boolean {

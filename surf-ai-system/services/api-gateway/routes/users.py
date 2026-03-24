@@ -1,6 +1,8 @@
 from collections import defaultdict
+import json
 import os
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
@@ -56,6 +58,197 @@ def _serialize_me(request: Request, user: dict) -> dict:
     }
 
 
+def _queue_user_backfill(
+    request: Request,
+    *,
+    current_user: dict,
+    reference_image_record: dict,
+) -> dict:
+    queue_url = request.app.state.matching_queue_url
+    if not queue_url or not current_user.get("pool_id"):
+        return {
+            "queued": False,
+            "job_id": None,
+            "user_embedding_id": reference_image_record["user_embedding_id"],
+            "queued_at": None,
+        }
+
+    try:
+        request.app.state.backfill_trigger_rate_limiter.check(
+            f"backfill:{current_user['user_id']}",
+            code="backfill_rate_limited",
+            message="Too many backfill triggers. Please wait before queueing more matching work.",
+        )
+        job_id = str(uuid.uuid4())
+        queued_at = datetime.now(timezone.utc).isoformat()
+        request.app.state.admin_sqs_client.send_message(
+            QueueUrl=queue_url,
+            MessageBody=json.dumps(
+                {
+                    "job_type": "backfill_user_matches",
+                    "job_id": job_id,
+                    "idempotency_key": (
+                        f"backfill:{current_user['pool_id']}:{current_user['user_id']}:"
+                        f"{reference_image_record['user_embedding_id']}"
+                    ),
+                    "pool_id": current_user["pool_id"],
+                    "user_id": current_user["user_id"],
+                    "user_embedding_id": reference_image_record["user_embedding_id"],
+                    "user_embedding": reference_image_record["embedding"],
+                    "batch_size": 100,
+                    "queued_at": queued_at,
+                }
+            ),
+        )
+        return {
+            "queued": True,
+            "job_id": job_id,
+            "user_embedding_id": reference_image_record["user_embedding_id"],
+            "queued_at": queued_at,
+        }
+    except HTTPException as exc:
+        logger.warning(
+            "Backfill rate limited for user_id=%s reference_image_id=%s: %s",
+            current_user["user_id"],
+            reference_image_record["user_embedding_id"],
+            exc.detail,
+        )
+        request.app.state.metrics.increment("backfill.rate_limited")
+        return {
+            "queued": False,
+            "job_id": None,
+            "user_embedding_id": reference_image_record["user_embedding_id"],
+            "queued_at": None,
+        }
+    except Exception as exc:
+        logger.error(
+            "Failed to queue backfill for user_id=%s reference_image_id=%s: %s",
+            current_user["user_id"],
+            reference_image_record["user_embedding_id"],
+            exc,
+            exc_info=True,
+        )
+        return {
+            "queued": False,
+            "job_id": None,
+            "user_embedding_id": reference_image_record["user_embedding_id"],
+            "queued_at": None,
+        }
+
+
+def _matching_job_ids(raw_value: str | None) -> set[str]:
+    if not raw_value:
+        return set()
+    return {part.strip() for part in raw_value.split(",") if part.strip()}
+
+
+def _summarize_backfill_status(
+    request: Request,
+    *,
+    current_user: dict,
+    job_ids: set[str] | None = None,
+) -> dict:
+    relevant_jobs = []
+    for job in request.app.state.pipeline_store.list_recent_jobs(
+        limit=200,
+        job_type="backfill_user_matches",
+    ):
+        payload = job.get("payload") or {}
+        if payload.get("user_id") != current_user["user_id"]:
+            continue
+        if payload.get("pool_id") != current_user.get("pool_id"):
+            continue
+        if job_ids and job.get("job_id") not in job_ids:
+            continue
+        relevant_jobs.append(job)
+
+    grouped: dict[str, dict] = {}
+    for job in relevant_jobs:
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            continue
+        payload = job.get("payload") or {}
+        summary = grouped.setdefault(
+            job_id,
+            {
+                "job_id": job_id,
+                "status": "running",
+                "started_at": job.get("started_at"),
+                "completed_at": job.get("completed_at"),
+                "updated_at": job.get("updated_at"),
+                "last_error": job.get("last_error"),
+                "user_embedding_id": payload.get("user_embedding_id"),
+                "batches_total": 0,
+                "batches_completed": 0,
+                "batches_failed": 0,
+                "batches_running": 0,
+            },
+        )
+        summary["batches_total"] += 1
+        summary["started_at"] = min(
+            [value for value in [summary.get("started_at"), job.get("started_at")] if value],
+            default=summary.get("started_at") or job.get("started_at"),
+        )
+        summary["updated_at"] = max(
+            [value for value in [summary.get("updated_at"), job.get("updated_at")] if value],
+            default=summary.get("updated_at") or job.get("updated_at"),
+        )
+        if job.get("status") == "completed":
+            summary["batches_completed"] += 1
+            summary["completed_at"] = max(
+                [value for value in [summary.get("completed_at"), job.get("completed_at")] if value],
+                default=summary.get("completed_at") or job.get("completed_at"),
+            )
+        elif job.get("status") == "failed":
+            summary["batches_failed"] += 1
+            summary["last_error"] = job.get("last_error") or summary.get("last_error")
+        else:
+            summary["batches_running"] += 1
+
+    job_summaries = list(grouped.values())
+    for summary in job_summaries:
+        if summary["batches_running"] > 0:
+            summary["status"] = "running"
+        elif summary["batches_failed"] > 0:
+            summary["status"] = "failed"
+        else:
+            summary["status"] = "done"
+
+    requested_ids = set(job_ids or set())
+    seen_ids = {summary["job_id"] for summary in job_summaries}
+    missing_requested = requested_ids - seen_ids
+    jobs_total = len(requested_ids) if requested_ids else len(job_summaries)
+    jobs_completed = sum(1 for summary in job_summaries if summary["status"] == "done")
+    jobs_failed = sum(1 for summary in job_summaries if summary["status"] == "failed")
+    jobs_running = sum(1 for summary in job_summaries if summary["status"] == "running")
+    jobs_pending = max(jobs_total - jobs_completed - jobs_failed - jobs_running, 0)
+
+    if jobs_total == 0:
+        status_value = "idle"
+        message = "No backfill running"
+    elif jobs_running > 0 or missing_requested:
+        status_value = "running"
+        message = "Backfill running..."
+    elif jobs_failed > 0:
+        status_value = "failed"
+        message = "Backfill failed"
+    else:
+        status_value = "done"
+        message = "Backfill done"
+
+    return {
+        "status": status_value,
+        "message": message,
+        "job_ids": sorted(requested_ids or seen_ids),
+        "jobs_total": jobs_total,
+        "jobs_completed": jobs_completed,
+        "jobs_failed": jobs_failed,
+        "jobs_running": jobs_running,
+        "jobs_pending": jobs_pending,
+        "jobs": sorted(job_summaries, key=lambda item: item.get("updated_at") or "", reverse=True),
+    }
+
+
 async def _store_reference_image(
     request: Request,
     *,
@@ -67,7 +260,13 @@ async def _store_reference_image(
         raise HTTPException(status_code=400, detail="Image file is required")
 
     try:
-        result = request.app.state.face_service.extract_embedding(image_bytes)
+        face_service = request.app.state.get_face_service()
+    except RuntimeError as exc:
+        logger.error("Face service unavailable while uploading reference image: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Face service is unavailable") from exc
+
+    try:
+        result = face_service.extract_embedding(image_bytes)
     except FaceUploadError as exc:
         request.app.state.metrics.increment(f"upload_face.error.{exc.code}")
         raise HTTPException(
@@ -102,6 +301,7 @@ async def _store_reference_image(
     return {
         "updated_user": updated_user,
         "reference_image": _serialize_reference_image(request, latest_reference),
+        "reference_image_record": latest_reference,
     }
 
 
@@ -151,12 +351,28 @@ def get_reference_images(
     ]
 
 
+@router.get("/me/backfill-status")
+def get_backfill_status(
+    request: Request,
+    job_ids: str | None = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    return _summarize_backfill_status(
+        request,
+        current_user=current_user,
+        job_ids=_matching_job_ids(job_ids),
+    )
+
+
 @router.post("/me/reference-images")
 async def upload_reference_images(
     request: Request,
     current_user: dict = Depends(get_current_user),
     files: list[UploadFile] = File(...),
 ) -> dict:
+    if not current_user.get("pool_id"):
+        raise HTTPException(status_code=400, detail="Select a pool before uploading reference images")
+
     client_ip = request.client.host if request.client else "unknown"
     request.app.state.metrics.increment("upload_face.attempt")
     try:
@@ -166,6 +382,8 @@ async def upload_reference_images(
         raise
 
     stored_images: list[dict] = []
+    queued_backfills = 0
+    backfill_jobs: list[dict] = []
     updated_user = current_user
     for file in files:
         stored = await _store_reference_image(
@@ -175,6 +393,14 @@ async def upload_reference_images(
         )
         updated_user = stored["updated_user"]
         stored_images.append(stored["reference_image"])
+        backfill_job = _queue_user_backfill(
+            request,
+            current_user=current_user,
+            reference_image_record=stored["reference_image_record"],
+        )
+        backfill_jobs.append(backfill_job)
+        if backfill_job["queued"]:
+            queued_backfills += 1
 
     request.app.state.metrics.increment("upload_face.success")
     logger.info(
@@ -187,6 +413,20 @@ async def upload_reference_images(
         "user_id": current_user["user_id"],
         "uploaded": len(stored_images),
         "embeddings_count": len(updated_user.get("embeddings", [])),
+        "backfill_jobs_queued": queued_backfills,
+        "backfill_job_ids": [
+            job["job_id"] for job in backfill_jobs if job.get("queued") and job.get("job_id")
+        ],
+        "backfill_jobs": backfill_jobs,
+        "backfill_status": _summarize_backfill_status(
+            request,
+            current_user=current_user,
+            job_ids={
+                job["job_id"]
+                for job in backfill_jobs
+                if job.get("queued") and job.get("job_id")
+            },
+        ),
         "reference_images": stored_images,
         "message": "Reference images uploaded successfully",
     }
@@ -216,6 +456,9 @@ async def upload_face(
     current_user: dict = Depends(get_current_user),
     file: UploadFile = File(...),
 ) -> dict:
+    if not current_user.get("pool_id"):
+        raise HTTPException(status_code=400, detail="Select a pool before uploading reference images")
+
     client_ip = request.client.host if request.client else "unknown"
     request.app.state.metrics.increment("upload_face.attempt")
     try:
@@ -230,6 +473,11 @@ async def upload_face(
         file=file,
     )
     updated_user = stored["updated_user"]
+    backfill_job = _queue_user_backfill(
+        request,
+        current_user=current_user,
+        reference_image_record=stored["reference_image_record"],
+    )
 
     request.app.state.metrics.increment("upload_face.success")
     logger.info(
@@ -240,6 +488,14 @@ async def upload_face(
     return {
         "user_id": current_user["user_id"],
         "embeddings_count": len(updated_user.get("embeddings", [])),
+        "backfill_queued": backfill_job["queued"],
+        "backfill_job_id": backfill_job["job_id"],
+        "backfill_job": backfill_job,
+        "backfill_status": _summarize_backfill_status(
+            request,
+            current_user=current_user,
+            job_ids={backfill_job["job_id"]} if backfill_job.get("job_id") else set(),
+        ),
         "message": "Face uploaded successfully",
     }
 
@@ -251,7 +507,10 @@ def get_user_videos(
     current_user: dict = Depends(get_current_user),
 ):
     request.app.state.metrics.increment("user_videos.fetch")
-    matches = request.app.state.db.list_matches_for_user(current_user["user_id"])
+    matches = request.app.state.db.list_matches_for_user(
+        current_user["user_id"],
+        pool_id=current_user.get("pool_id"),
+    )
     media = request.app.state.media_service
 
     videos = [

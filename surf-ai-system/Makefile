@@ -1,4 +1,4 @@
-.PHONY: build up down logs run-local
+.PHONY: build up down logs run-local deploy-prod rollback deploy-worker
 
 build:
 	docker-compose -f infra/docker-compose.yml build
@@ -14,3 +14,12 @@ logs:
 
 run-local:
 	./scripts/local_run.sh
+
+deploy-prod:
+	./scripts/prod_deploy.sh
+
+rollback:
+	./scripts/rollback.sh
+
+deploy-worker:
+	./scripts/deploy_worker.sh $(SERVICE)

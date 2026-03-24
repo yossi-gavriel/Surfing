@@ -138,6 +138,16 @@ cat <<'__NGINX_EOF__' > /etc/nginx/sites-available/surf-ai
 ${nginx_conf}
 __NGINX_EOF__
 
+cat <<'__UPSTREAMS_EOF__' > /etc/nginx/conf.d/surf-ai-upstreams.conf
+upstream api_upstream {
+    server 127.0.0.1:8000;
+}
+
+upstream frontend_upstream {
+    server 127.0.0.1:4200;
+}
+__UPSTREAMS_EOF__
+
 ln -sf /etc/nginx/sites-available/surf-ai /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 

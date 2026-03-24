@@ -4,6 +4,7 @@ import { Component, inject, signal } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 
 import { AuthService } from '../../core/auth.service';
+import { I18nService } from '../../core/i18n.service';
 
 interface DebugReferenceImage {
   user_embedding_id: string;
@@ -32,12 +33,43 @@ interface DebugVideoFrame {
   best_reference_image_url?: string | null;
   bbox?: number[] | null;
   face_bbox?: number[] | null;
+  quality_score?: number | null;
   has_face?: boolean;
   used_for_embedding?: boolean;
   is_valid?: boolean;
-  hasFaceLabel?: string;
-  validLabel?: string;
-  usedLabel?: string;
+  frames_count?: number | null;
+  embeddings_count?: number | null;
+  consistency?: number | null;
+  quality_avg?: number | null;
+  aggregation_method?: string | null;
+  frames_received?: number | null;
+  embeddings_created?: number | null;
+  used_frame_indexes?: number[];
+  second_best_similarity?: number | null;
+  similarity_margin?: number | null;
+  margin?: number | null;
+  match_rejection_reason?: string | null;
+  passes_similarity?: boolean;
+  passes_margin?: boolean;
+  final_verdict?: string | null;
+  decision?: string | null;
+  decision_reason?: string | null;
+  decision_explanation?: string | null;
+  threshold_used?: number | null;
+  margin_threshold_used?: number | null;
+  last_attempt?: {
+    persist_status?: string | null;
+    decision_reason?: string | null;
+    decision_explanation?: string | null;
+    processed_at?: string | null;
+    existing_user_id?: string | null;
+  } | null;
+  last_attempt_outcome?: string | null;
+  last_attempt_at?: string | null;
+  det_score?: number | null;
+  face_size?: number | null;
+  blur_score?: number | null;
+  rejection_reason?: string | null;
   distance: number | null;
   similarity: number | null;
   is_match_under_threshold: boolean;
@@ -48,6 +80,10 @@ interface DebugCompareResponse {
   user_embeddings: number;
   video_embeddings: number;
   pool_id?: string | null;
+  pool?: {
+    pool_id: string;
+    name: string;
+  } | null;
   pool_users?: number;
   threshold: number;
   best_match_user_id?: string | null;
@@ -55,12 +91,29 @@ interface DebugCompareResponse {
   best_reference_user_embedding_id: string | null;
   best_reference_image_url: string | null;
   reference_images: DebugReferenceImage[];
+  track_summaries?: DebugVideoFrame[];
   video_frames: DebugVideoFrame[];
   debug_frames: DebugVideoFrame[];
+  comparisons?: Array<{
+    video_embedding_id: string;
+    user_embedding_id: string;
+    user_id: string;
+    user_email: string;
+    distance: number;
+    similarity: number;
+    is_match_under_threshold: boolean;
+  }>;
   matches?: Array<{
     user_id: string;
     email: string;
     score: number;
+    best_similarity?: number | null;
+    second_best_similarity?: number | null;
+    margin?: number | null;
+    threshold_used?: number | null;
+    margin_threshold_used?: number | null;
+    decision_reason?: string | null;
+    decision_explanation?: string | null;
     confidence: number;
     distance: number;
   }>;
@@ -69,6 +122,14 @@ interface DebugCompareResponse {
   summary: {
     total_frames: number;
     valid_frames: number;
+    used_frames?: number;
+    tracks?: number;
+    matched_tracks?: number;
+    rejected_tracks?: number;
+    rejected_low_similarity?: number;
+    rejected_low_margin?: number;
+    rejected_min_frames?: number;
+    rejected_track_consistency?: number;
     best_similarity: number | null;
     best_distance: number | null;
     force_match: boolean;
@@ -82,36 +143,40 @@ interface DebugCompareResponse {
   template: `
     <section class="header-card">
       <div class="header-copy">
-        <button class="back" type="button" (click)="goBack()">Back to videos</button>
-        <p class="eyebrow">Video debug</p>
+        <button class="back" type="button" (click)="goBack()">{{ i18n.t('admin.debug.back') }}</button>
+        <p class="eyebrow">{{ i18n.t('admin.debug.eyebrow') }}</p>
         <h2>{{ debugData()?.video_id || videoId }}</h2>
-        <p class="subcopy">
-          Best pool reference image on top, then every stored video frame ranked against the active pool.
-        </p>
+        <p class="subcopy">{{ i18n.t('admin.debug.subtitle') }}</p>
       </div>
       <button type="button" (click)="loadDebug()" [disabled]="loading()">
-        {{ loading() ? 'Refreshing...' : 'Refresh' }}
+        {{ loading() ? i18n.t('common.refreshing') : i18n.t('common.refresh') }}
       </button>
     </section>
 
     <section class="feedback error" *ngIf="errorMessage()">{{ errorMessage() }}</section>
 
-    <section class="state-card" *ngIf="loading()">Loading debug data...</section>
+    <section class="state-card" *ngIf="loading()">{{ i18n.t('admin.debug.loading') }}</section>
 
     <section class="debug-layout" *ngIf="!loading() && debugData() as debug">
       <article class="panel reference-panel">
         <div class="panel-header">
           <div>
-            <p class="panel-label">Reference image</p>
-            <h3>Best reference image</h3>
+            <p class="panel-label">{{ i18n.t('admin.debug.referenceImage') }}</p>
+            <h3>{{ i18n.t('admin.debug.bestReferenceImage') }}</h3>
           </div>
           <div class="pill-group">
-            <span class="pill">Pool users {{ debug.pool_users ?? 0 }}</span>
-            <span class="pill">User embeddings {{ debug.user_embeddings }}</span>
-            <span class="pill">Video embeddings {{ debug.video_embeddings }}</span>
-            <span class="pill">Threshold {{ formatMetric(debug.threshold) }}</span>
-            <span class="pill">Frames {{ debug.summary.total_frames }}</span>
-            <span class="pill">Valid {{ debug.summary.valid_frames }}</span>
+            <span class="pill">{{ i18n.t('admin.debug.poolUsers', { count: debug.pool_users ?? 0 }) }}</span>
+            <span class="pill">{{ i18n.t('admin.debug.userEmbeddings', { count: debug.user_embeddings }) }}</span>
+            <span class="pill">{{ i18n.t('admin.debug.videoEmbeddings', { count: debug.video_embeddings }) }}</span>
+            <span class="pill">{{ i18n.t('admin.debug.threshold', { value: formatMetric(debug.threshold) }) }}</span>
+            <span class="pill">{{ i18n.t('admin.debug.frames', { count: debug.summary.total_frames }) }}</span>
+            <span class="pill">{{ i18n.t('admin.debug.valid', { count: debug.summary.valid_frames }) }}</span>
+            <span class="pill">Tracks {{ debug.summary.tracks ?? debug.video_frames.length }}</span>
+            <span class="pill">Used {{ debug.summary.used_frames ?? 0 }}</span>
+            <span class="pill">Matched {{ debug.summary.matched_tracks ?? 0 }}</span>
+            <span class="pill">Rejected {{ debug.summary.rejected_tracks ?? 0 }}</span>
+            <span class="pill">Low sim {{ debug.summary.rejected_low_similarity ?? 0 }}</span>
+            <span class="pill">Low margin {{ debug.summary.rejected_low_margin ?? 0 }}</span>
           </div>
         </div>
 
@@ -123,53 +188,196 @@ interface DebugCompareResponse {
         />
 
         <ng-template #noReferenceImage>
-          <div class="placeholder">No stored uploaded face image is available yet for this user.</div>
+          <div class="placeholder">{{ i18n.t('admin.debug.noReferenceImage') }}</div>
         </ng-template>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-label">{{ i18n.t('admin.debug.referenceImage') }}</p>
+            <h3>{{ i18n.t('admin.debug.referenceGallery') }}</h3>
+          </div>
+          <span class="pill">{{ debug.reference_images.length }}</span>
+        </div>
+
+        <div class="empty" *ngIf="debug.reference_images.length === 0">{{ i18n.t('admin.debug.noReferenceImage') }}</div>
+
+        <div class="reference-grid" *ngIf="debug.reference_images.length > 0">
+          <article class="reference-card" *ngFor="let reference of debug.reference_images">
+            <img *ngIf="reference.image_url; else missingReference" [src]="reference.image_url" alt="Reference image" class="frame-image" />
+            <ng-template #missingReference>
+              <div class="placeholder frame-placeholder">{{ i18n.t('common.imageUnavailable') }}</div>
+            </ng-template>
+            <div class="frame-body">
+              <strong>{{ reference.user_email || reference.user_id || reference.user_embedding_id }}</strong>
+              <small class="time">{{ formatTimestamp(reference.created_at) }}</small>
+            </div>
+          </article>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-label">{{ i18n.t('admin.debug.matchesTitle') }}</p>
+            <h3>{{ i18n.t('admin.debug.confirmedMatches') }}</h3>
+          </div>
+          <span class="pill">{{ debug.matches?.length ?? 0 }}</span>
+        </div>
+
+        <div class="empty" *ngIf="(debug.matches?.length ?? 0) === 0">{{ i18n.t('admin.debug.noConfirmedMatches') }}</div>
+
+        <div class="match-list" *ngIf="(debug.matches?.length ?? 0) > 0">
+          <article class="result-row" *ngFor="let match of debug.matches">
+            <strong>{{ match.email }}</strong>
+            <span>{{ i18n.t('admin.debug.scoreLabel', { value: formatMetric(match.score) }) }}</span>
+            <span>{{ i18n.t('admin.debug.confidenceLabel', { value: formatMetric(match.confidence) }) }}</span>
+            <span>{{ i18n.t('admin.debug.distance', { value: formatMetric(match.distance) }) }}</span>
+            <span *ngIf="match.margin !== undefined && match.margin !== null">Margin {{ formatMetric(match.margin) }}</span>
+            <span *ngIf="match.threshold_used !== undefined && match.threshold_used !== null">Threshold {{ formatMetric(match.threshold_used) }}</span>
+            <small *ngIf="match.decision_explanation">{{ match.decision_explanation }}</small>
+          </article>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-label">{{ i18n.t('admin.debug.videoFrames') }}</p>
+            <h3>{{ i18n.t('admin.debug.videoEmbeddingsPanel') }}</h3>
+          </div>
+          <span class="pill">{{ debug.video_frames.length }}</span>
+        </div>
+
+        <div class="empty" *ngIf="debug.video_frames.length === 0">{{ i18n.t('admin.debug.noVideoEmbeddings') }}</div>
+
+        <div class="frames-grid" *ngIf="debug.video_frames.length > 0">
+          <article class="frame-card" *ngFor="let frame of debug.video_frames">
+            <img
+              *ngIf="frame.keyframe_url; else missingKeyframe"
+              [src]="frame.keyframe_url || ''"
+              alt="Video embedding keyframe"
+              class="frame-image"
+            />
+            <ng-template #missingKeyframe>
+              <div class="placeholder frame-placeholder">{{ i18n.t('common.imageUnavailable') }}</div>
+            </ng-template>
+
+            <div class="frame-body">
+              <div class="frame-meta">
+                <strong>{{ frame.track_id }}</strong>
+                <span class="status" [class.matched]="frame.is_match_under_threshold" [class.unmatched]="!frame.is_match_under_threshold">
+                  {{ frame.is_match_under_threshold ? i18n.t('admin.debug.underThreshold') : i18n.t('admin.debug.overThreshold') }}
+                </span>
+              </div>
+
+              <div class="metrics">
+                <span>{{ i18n.t('admin.debug.distance', { value: formatNullableMetric(frame.distance) }) }}</span>
+                <span>{{ i18n.t('admin.debug.similarity', { value: formatNullableMetric(frame.similarity) }) }}</span>
+                <span *ngIf="frame.frames_count !== undefined">Frames {{ frame.frames_count }}</span>
+                <span *ngIf="frame.embeddings_count !== undefined">Embeddings {{ frame.embeddings_count }}</span>
+                <span *ngIf="frame.frames_received !== undefined">Received {{ frame.frames_received }}</span>
+                <span *ngIf="frame.embeddings_created !== undefined">Eligible {{ frame.embeddings_created }}</span>
+                <span *ngIf="frame.quality_avg !== undefined">Quality {{ formatNullableMetric(frame.quality_avg ?? null) }}</span>
+                <span *ngIf="frame.consistency !== undefined">Consistency {{ formatNullableMetric(frame.consistency ?? null) }}</span>
+                <span *ngIf="frame.second_best_similarity !== undefined">2nd {{ formatNullableMetric(frame.second_best_similarity ?? null) }}</span>
+                <span *ngIf="frame.margin !== undefined">Margin {{ formatNullableMetric(frame.margin ?? null) }}</span>
+                <span *ngIf="frame.decision">Decision {{ frame.decision }}</span>
+                <span *ngIf="frame.best_user_email">{{ i18n.t('admin.debug.bestUser', { email: frame.best_user_email }) }}</span>
+              </div>
+
+              <small class="time">{{ formatRange(frame.start_time ?? null, frame.end_time ?? null) }}</small>
+              <small class="time" *ngIf="frame.aggregation_method">{{ frame.aggregation_method }}</small>
+              <small class="time" *ngIf="frame.used_frame_indexes?.length">Used frames: {{ frame.used_frame_indexes?.join(', ') }}</small>
+              <small class="time" *ngIf="frame.threshold_used !== undefined && frame.threshold_used !== null">
+                Threshold {{ formatNullableMetric(frame.threshold_used) }} / Margin threshold {{ formatNullableMetric(frame.margin_threshold_used ?? null) }}
+              </small>
+              <small class="time" *ngIf="frame.decision_reason">
+                Reason: {{ frame.decision_reason }}
+              </small>
+              <small class="time" *ngIf="frame.decision_explanation">{{ frame.decision_explanation }}</small>
+              <small class="time" *ngIf="frame.last_attempt_outcome">
+                Last attempt: {{ frame.last_attempt_outcome }}{{ frame.last_attempt_at ? ' at ' + formatTimestamp(frame.last_attempt_at) : '' }}
+              </small>
+            </div>
+          </article>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-label">{{ i18n.t('admin.debug.distancesTitle') }}</p>
+            <h3>{{ i18n.t('admin.debug.bestComparisons') }}</h3>
+          </div>
+          <span class="pill">{{ debug.comparisons?.length ?? 0 }}</span>
+        </div>
+
+        <div class="empty" *ngIf="(debug.comparisons?.length ?? 0) === 0">{{ i18n.t('admin.debug.noComparisons') }}</div>
+
+        <div class="match-list" *ngIf="(debug.comparisons?.length ?? 0) > 0">
+          <article class="result-row" *ngFor="let comparison of (debug.comparisons || []).slice(0, 12)">
+            <strong>{{ comparison.user_email }}</strong>
+            <span>{{ comparison.video_embedding_id }}</span>
+            <span>{{ i18n.t('admin.debug.distance', { value: formatMetric(comparison.distance) }) }}</span>
+            <span>{{ i18n.t('admin.debug.similarity', { value: formatMetric(comparison.similarity) }) }}</span>
+          </article>
+        </div>
       </article>
 
       <article class="panel frames-panel">
         <div class="panel-header">
           <div>
-            <p class="panel-label">Video frames</p>
-            <h3>All stored debug frames</h3>
+            <p class="panel-label">{{ i18n.t('admin.debug.videoFrames') }}</p>
+            <h3>{{ i18n.t('admin.debug.allFrames') }}</h3>
           </div>
         </div>
 
-          <div class="summary-row">
-          <span class="pill">Best similarity {{ formatNullableMetric(debug.summary.best_similarity) }}</span>
-          <span class="pill">Best distance {{ formatNullableMetric(debug.summary.best_distance) }}</span>
-          <span class="pill" *ngIf="debug.best_match_user_email">Best user {{ debug.best_match_user_email }}</span>
-          <span class="pill" *ngIf="debug.assigned_user_email">Assigned {{ debug.assigned_user_email }}</span>
-          <span class="pill" [class.force]="debug.summary.force_match">Force match {{ debug.summary.force_match ? 'yes' : 'no' }}</span>
+        <div class="summary-row">
+          <span class="pill">{{ i18n.t('admin.debug.bestSimilarity', { value: formatNullableMetric(debug.summary.best_similarity) }) }}</span>
+          <span class="pill">{{ i18n.t('admin.debug.bestDistance', { value: formatNullableMetric(debug.summary.best_distance) }) }}</span>
+          <span class="pill" *ngIf="debug.best_match_user_email">{{ i18n.t('admin.debug.bestUser', { email: debug.best_match_user_email }) }}</span>
+          <span class="pill" *ngIf="debug.assigned_user_email">{{ i18n.t('admin.debug.assigned', { email: debug.assigned_user_email }) }}</span>
+          <span class="pill" [class.force]="debug.summary.force_match">
+            {{ i18n.t('admin.debug.forceMatch', { value: debug.summary.force_match ? i18n.t('common.yes') : i18n.t('common.no') }) }}
+          </span>
         </div>
 
-        <div class="empty" *ngIf="debug.debug_frames.length === 0">
-          No stored debug frames were found for this video yet.
-        </div>
+        <div class="empty" *ngIf="debug.debug_frames.length === 0">{{ i18n.t('admin.debug.noFrames') }}</div>
 
         <div class="frames-grid" *ngIf="debug.debug_frames.length > 0">
           <article class="frame-card" *ngFor="let frame of debug.debug_frames" [class.used]="frame.used_for_embedding">
-            <img *ngIf="frame.image_url || frame.keyframe_url; else noFrameImage" [src]="frame.image_url || frame.keyframe_url || ''" alt="Video frame" class="frame-image" />
+            <img
+              *ngIf="frame.image_url || frame.keyframe_url; else noFrameImage"
+              [src]="frame.image_url || frame.keyframe_url || ''"
+              alt="Video frame"
+              class="frame-image"
+            />
 
             <ng-template #noFrameImage>
-              <div class="placeholder frame-placeholder">No frame image available</div>
+              <div class="placeholder frame-placeholder">{{ i18n.t('common.imageUnavailable') }}</div>
             </ng-template>
 
             <div class="frame-body">
               <div class="frame-meta">
                 <strong>{{ frame.track_id }} / #{{ frame.frame_index ?? 0 }}</strong>
                 <span class="status" [class.matched]="frame.is_match_under_threshold" [class.unmatched]="!frame.is_match_under_threshold">
-                  {{ frame.is_match_under_threshold ? 'under threshold' : 'over threshold' }}
+                  {{ frame.is_match_under_threshold ? i18n.t('admin.debug.underThreshold') : i18n.t('admin.debug.overThreshold') }}
                 </span>
               </div>
 
               <div class="metrics">
-                <span>Distance {{ formatNullableMetric(frame.distance) }}</span>
-                <span>Similarity {{ formatNullableMetric(frame.similarity) }}</span>
-                <span *ngIf="frame.user_email">User {{ frame.user_email }}</span>
-                <span>Has face {{ frame.hasFaceLabel }}</span>
-                <span>Valid {{ frame.validLabel }}</span>
-                <span>Used {{ frame.usedLabel }}</span>
+                <span>{{ i18n.t('admin.debug.distance', { value: formatNullableMetric(frame.distance) }) }}</span>
+                <span>{{ i18n.t('admin.debug.similarity', { value: formatNullableMetric(frame.similarity) }) }}</span>
+                <span>Quality {{ formatNullableMetric(frame.quality_score ?? null) }}</span>
+                <span *ngIf="frame.det_score !== undefined">Det {{ formatNullableMetric(frame.det_score ?? null) }}</span>
+                <span *ngIf="frame.face_size !== undefined">Face {{ formatNullableMetric(frame.face_size ?? null, 0) }}</span>
+                <span *ngIf="frame.blur_score !== undefined">Blur {{ formatNullableMetric(frame.blur_score ?? null) }}</span>
+                <span *ngIf="frame.user_email">{{ i18n.t('admin.debug.user', { email: frame.user_email }) }}</span>
+                <span>{{ i18n.t('admin.debug.hasFace', { value: boolLabel(frame.has_face) }) }}</span>
+                <span>{{ i18n.t('admin.debug.validLabel', { value: boolLabel(frame.is_valid) }) }}</span>
+                <span>{{ i18n.t('admin.debug.used', { value: boolLabel(frame.used_for_embedding) }) }}</span>
               </div>
 
               <small class="time" *ngIf="frame.frame_timestamp || frame.start_time || frame.end_time">
@@ -177,11 +385,15 @@ interface DebugCompareResponse {
               </small>
 
               <small class="time" *ngIf="frame.face_bbox?.length">
-                Face bbox {{ formatBbox(frame.face_bbox || null) }}
+                {{ i18n.t('admin.debug.faceBbox', { value: formatBbox(frame.face_bbox || null) }) }}
               </small>
 
               <small class="time" *ngIf="frame.bbox?.length">
-                Track bbox {{ formatBbox(frame.bbox || null) }}
+                {{ i18n.t('admin.debug.trackBbox', { value: formatBbox(frame.bbox || null) }) }}
+              </small>
+
+              <small class="time" *ngIf="frame.rejection_reason">
+                Rejection: {{ frame.rejection_reason }}
               </small>
             </div>
           </article>
@@ -317,6 +529,17 @@ interface DebugCompareResponse {
       margin-top: 1rem;
     }
 
+    .reference-grid,
+    .match-list {
+      display: grid;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .reference-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
     .summary-row {
       display: flex;
       flex-wrap: wrap;
@@ -329,6 +552,25 @@ interface DebugCompareResponse {
       border-radius: 24px;
       background: rgba(255, 255, 255, 0.8);
       border: 1px solid rgba(20, 60, 68, 0.08);
+    }
+
+    .reference-card,
+    .result-row {
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.8);
+      border: 1px solid rgba(20, 60, 68, 0.08);
+    }
+
+    .result-row {
+      padding: 1rem;
+      display: grid;
+      gap: 0.45rem;
+      color: var(--ink-soft);
+    }
+
+    .result-row strong {
+      color: var(--ink-strong);
+      overflow-wrap: anywhere;
     }
 
     .frame-card.used {
@@ -426,6 +668,7 @@ export class AdminVideoDebugComponent {
   private readonly auth = inject(AuthService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
+  protected readonly i18n = inject(I18nService);
 
   readonly loading = signal(false);
   readonly errorMessage = signal('');
@@ -439,7 +682,7 @@ export class AdminVideoDebugComponent {
 
   loadDebug(): void {
     if (!this.videoId) {
-      this.errorMessage.set('Missing video id.');
+      this.errorMessage.set(this.i18n.t('admin.debug.missingVideoId'));
       return;
     }
 
@@ -452,22 +695,12 @@ export class AdminVideoDebugComponent {
       })
       .subscribe({
         next: (response) => {
-          const mappedDebugFrames = response.debug_frames.map((frame) => ({
-            ...frame,
-            hasFaceLabel: frame.has_face ? 'yes' : 'no',
-            validLabel: frame.is_valid ? 'yes' : 'no',
-            usedLabel: frame.used_for_embedding ? 'yes' : 'no',
-          }));
-          this.debugData.set({
-            ...response,
-            debug_frames: mappedDebugFrames,
-          });
+          this.debugData.set(response);
           this.loading.set(false);
         },
         error: (error) => {
           this.loading.set(false);
-          const detail = error?.error?.detail;
-          this.errorMessage.set(detail?.message || detail || 'Unable to load video debug details.');
+          this.errorMessage.set(this.i18n.translateApiMessage(error?.error?.detail, 'admin.debug.loadFailed'));
           if (error?.status === 401) {
             this.auth.clearSession();
             this.router.navigate(['/login']);
@@ -480,28 +713,31 @@ export class AdminVideoDebugComponent {
     this.router.navigate(['/admin']);
   }
 
+  boolLabel(value: boolean | undefined): string {
+    return value ? this.i18n.t('common.yes') : this.i18n.t('common.no');
+  }
+
   formatMetric(value: number, digits = 3): string {
-    return Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
+    return Number.isFinite(value) ? value.toFixed(digits) : this.i18n.t('common.notAvailable');
   }
 
   formatNullableMetric(value: number | null, digits = 3): string {
-    return value === null ? 'n/a' : this.formatMetric(value, digits);
+    return value === null ? this.i18n.t('common.notAvailable') : this.formatMetric(value, digits);
   }
 
   formatRange(start: string | null, end: string | null): string {
-    const startLabel = start ? this.formatTimestamp(start) : 'unknown start';
-    const endLabel = end ? this.formatTimestamp(end) : 'unknown end';
+    const startLabel = start ? this.formatTimestamp(start) : this.i18n.t('admin.debug.unknownStart');
+    const endLabel = end ? this.formatTimestamp(end) : this.i18n.t('admin.debug.unknownEnd');
     return `${startLabel} - ${endLabel}`;
   }
 
   formatTimestamp(value: string): string {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+    return this.i18n.formatDateTime(value);
   }
 
   formatBbox(values: number[] | null): string {
     if (!values || values.length !== 4) {
-      return 'n/a';
+      return this.i18n.t('common.notAvailable');
     }
     return values.map((value) => value.toFixed(0)).join(', ');
   }

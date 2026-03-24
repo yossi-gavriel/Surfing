@@ -4,11 +4,18 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
-from shared.utils.embeddings import pairwise_cosine_similarity, pairwise_euclidean_distances
+from shared.utils.debug_compare import build_debug_compare_response
+from shared.utils.embeddings import normalize_embeddings, pairwise_cosine_similarity
 from shared.utils.logger import get_logger
+from shared.utils.match_decision import evaluate_track_match
+from shared.utils.system_config import (
+    SYSTEM_CONFIG_DEFINITIONS,
+    get_default_system_config,
+)
+from src.face_service import FaceUploadError
 from src.security import get_current_user, is_admin_user
 
 logger = get_logger("api-admin")
@@ -29,6 +36,12 @@ class PoolRequest(BaseModel):
 
 class VideoAssignmentRequest(BaseModel):
     user_id: str | None = None
+
+
+class ConfigRollbackRequest(BaseModel):
+    batch_id: str | None = None
+    audit_id: int | None = None
+    key: str | None = None
 
 
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
@@ -73,17 +86,176 @@ def _serialize_user_summary(request: Request, user: dict) -> dict:
     }
 
 
-def _current_match_threshold() -> float:
-    try:
-        return float(os.environ.get("MATCH_THRESHOLD", "0.75"))
-    except (TypeError, ValueError):
-        return 0.75
+def _runtime_config(request: Request) -> dict[str, int | float]:
+    config_service = request.app.state.system_config
+    defaults = get_default_system_config()
+    return {
+        key: config_service.get_config(key, default_value)
+        for key, default_value in defaults.items()
+    }
+
+
+def _match_thresholds(request: Request) -> dict[str, float]:
+    config = _runtime_config(request)
+    return {
+        "min_similarity": float(config["min_similarity"]),
+        "min_margin": float(config["min_margin"]),
+    }
+
+
+def _matching_constraints(request: Request) -> dict[str, float | int]:
+    config = _runtime_config(request)
+    return {
+        "min_track_embeddings": int(config["min_frames_per_track"]),
+        "min_track_consistency": float(
+            request.app.state.matching_min_track_consistency
+        ),
+    }
 
 
 def _video_belongs_to_pool(video: dict[str, Any], pool_id: str | None) -> bool:
     if pool_id is None:
         return video.get("pool_id") is None
     return video.get("pool_id") == pool_id
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _duration_seconds(start_value: str | None, end_value: str | None) -> float | None:
+    start_dt = _parse_iso_datetime(start_value)
+    end_dt = _parse_iso_datetime(end_value)
+    if start_dt is None or end_dt is None:
+        return None
+    return round(max((end_dt - start_dt).total_seconds(), 0.0), 3)
+
+
+def _build_video_pipeline_summary(
+    request: Request,
+    *,
+    video: dict[str, Any],
+) -> dict[str, Any]:
+    diagnostics = video.get("diagnostics") or {}
+    frame_data = diagnostics.get("frame_processor") or {}
+    embedding_data = diagnostics.get("embedding_service") or {}
+    matching_data = diagnostics.get("matching_service") or {}
+    matching_tracks = matching_data.get("tracks") or {}
+    embedding_tracks = embedding_data.get("tracks") or {}
+    constraints = _matching_constraints(request)
+    runtime_config = _runtime_config(request)
+
+    total_tracks = max(
+        int(frame_data.get("output_tracks", 0) or 0),
+        int(embedding_data.get("tracks_received", 0) or 0),
+        len(embedding_tracks),
+        len(matching_tracks),
+    )
+    rejected_tracks = sum(
+        1 for item in embedding_tracks.values() if item.get("status") == "rejected"
+    )
+    matched_tracks = sum(
+        1 for item in matching_tracks.values() if item.get("decision") == "match"
+    )
+    unmatched_tracks = sum(
+        1 for item in matching_tracks.values() if item.get("decision") == "no_match"
+    ) + rejected_tracks
+    processed_tracks = matched_tracks + unmatched_tracks
+    pending_tracks = max(total_tracks - processed_tracks, 0)
+
+    similarities = [
+        float(item["best_similarity"])
+        for item in matching_tracks.values()
+        if item.get("best_similarity") is not None
+    ]
+    margins = [
+        float(item["margin"])
+        for item in matching_tracks.values()
+        if item.get("margin") is not None
+    ]
+    matches = request.app.state.db.list_matches_for_video(
+        video_id=video["video_id"],
+        pool_id=video.get("pool_id"),
+    )
+    matches_count = len(matches)
+    rejection_rate = None
+    if processed_tracks > 0:
+        rejection_rate = round((unmatched_tracks / processed_tracks) * 100.0, 2)
+
+    stage_status = {
+        "upload": "completed",
+        "frame": "completed"
+        if frame_data.get("completed_at")
+        else ("processing" if frame_data.get("started_at") else "pending"),
+        "embedding": "completed"
+        if total_tracks > 0 and int(embedding_data.get("tracks_received", 0) or 0) >= total_tracks
+        else ("processing" if embedding_data.get("started_at") else "pending"),
+        "matching": "completed"
+        if total_tracks == 0 or pending_tracks == 0
+        else ("processing" if matching_tracks else "pending"),
+    }
+    progress_percent = 10
+    if frame_data.get("started_at"):
+        progress_percent = 30
+    if frame_data.get("completed_at"):
+        progress_percent = 50
+    if embedding_data.get("started_at"):
+        progress_percent = 65
+    if total_tracks > 0:
+        progress_percent = max(
+            progress_percent,
+            min(99, int(round(65 + (35 * (processed_tracks / total_tracks))))),
+        )
+    if video.get("status") == "completed":
+        progress_percent = 100
+    if video.get("status") == "failed":
+        progress_percent = max(progress_percent, 1)
+
+    final_completed_at = (
+        matching_data.get("completed_at")
+        or embedding_data.get("completed_at")
+        or frame_data.get("completed_at")
+        or video.get("updated_at")
+    )
+    stage_timings = {
+        "upload_seconds": (diagnostics.get("ingestion_service") or {}).get("upload_seconds"),
+        "queue_delay_seconds": frame_data.get("queue_delay_seconds"),
+        "frame_processing_seconds": frame_data.get("processing_seconds"),
+        "embedding_processing_seconds": embedding_data.get("processing_seconds"),
+        "matching_processing_seconds": matching_data.get("processing_seconds"),
+        "total_pipeline_seconds": _duration_seconds(video.get("created_at"), final_completed_at),
+    }
+    quality_guard = {
+        "min_frames_per_track": int(constraints["min_track_embeddings"]),
+        "min_track_consistency": float(constraints["min_track_consistency"]),
+        "min_quality_score": float(runtime_config["min_quality_score"]),
+        "rejection_counts": embedding_data.get("rejection_counts") or {},
+    }
+
+    return {
+        "progress_percent": progress_percent,
+        "stage_status": stage_status,
+        "stage_timings": stage_timings,
+        "tracks_total": total_tracks,
+        "tracks_processed": processed_tracks,
+        "tracks_pending": pending_tracks,
+        "tracks_matched": matched_tracks,
+        "tracks_unmatched": unmatched_tracks,
+        "tracks_rejected": rejected_tracks,
+        "matches_count": matches_count,
+        "rejection_rate": rejection_rate,
+        "avg_similarity": None
+        if not similarities
+        else round(sum(similarities) / len(similarities), 4),
+        "avg_margin": None if not margins else round(sum(margins) / len(margins), 4),
+        "quality_guard": quality_guard,
+    }
 
 
 def _build_compare_response(
@@ -116,6 +288,10 @@ def _build_compare_response(
         }
         for item in request.app.state.pipeline_store.list_video_embeddings(video_id)
     ]
+    frame_embeddings_lookup = {
+        (item["track_id"], int(item["frame_index"])): item
+        for item in request.app.state.pipeline_store.list_video_frame_embeddings(video_id)
+    }
     debug_frames = [
         {
             **item,
@@ -123,239 +299,29 @@ def _build_compare_response(
         }
         for item in request.app.state.pipeline_store.list_video_debug_frames(video_id)
     ]
-    threshold = _current_match_threshold()
-
-    comparisons: list[dict[str, Any]] = []
-    video_frames: list[dict[str, Any]] = []
-    debug_frame_results: list[dict[str, Any]] = []
-    if pool_reference_images and video_embeddings:
-        user_vectors = [item["embedding"] for item in pool_reference_images]
-        video_vectors = [item["embedding"] for item in video_embeddings]
-        distances = pairwise_euclidean_distances(video_vectors, user_vectors)
-        similarities = pairwise_cosine_similarity(video_vectors, user_vectors)
-        best_by_video_embedding: dict[str, dict[str, Any]] = {}
-
-        for video_index, video_embedding in enumerate(video_embeddings):
-            for user_index, reference_image in enumerate(pool_reference_images):
-                distance = float(distances[video_index, user_index])
-                similarity = float(similarities[video_index, user_index])
-                comparison = {
-                    "video_embedding_id": video_embedding["video_embedding_id"],
-                    "user_embedding_id": reference_image["user_embedding_id"],
-                    "user_id": reference_image["user_id"],
-                    "user_email": reference_image["email"],
-                    "distance": distance,
-                    "similarity": similarity,
-                    "is_match_under_threshold": distance <= threshold,
-                }
-                comparisons.append(comparison)
-
-                best_for_video = best_by_video_embedding.get(video_embedding["video_embedding_id"])
-                if best_for_video is None or distance < best_for_video["distance"]:
-                    best_by_video_embedding[video_embedding["video_embedding_id"]] = {
-                        "video_embedding_id": video_embedding["video_embedding_id"],
-                        "track_id": video_embedding["track_id"],
-                        "keyframe_s3": video_embedding.get("keyframe_s3"),
-                        "keyframe_url": video_embedding.get("keyframe_url"),
-                        "start_time": video_embedding.get("start_time"),
-                        "end_time": video_embedding.get("end_time"),
-                        "best_user_id": reference_image["user_id"],
-                        "best_user_email": reference_image["email"],
-                        "best_user_embedding_id": reference_image["user_embedding_id"],
-                        "best_reference_image_url": reference_image.get("source_image_url"),
-                        "distance": distance,
-                        "similarity": similarity,
-                        "is_match_under_threshold": distance <= threshold,
-                    }
-
-        comparisons.sort(key=lambda item: item["distance"])
-        video_frames = sorted(
-            best_by_video_embedding.values(),
-            key=lambda item: item["distance"],
-        )
-    else:
-        video_frames = [
-            {
-                "video_embedding_id": item["video_embedding_id"],
-                "track_id": item["track_id"],
-                "keyframe_s3": item.get("keyframe_s3"),
-                "keyframe_url": item.get("keyframe_url"),
-                "start_time": item.get("start_time"),
-                "end_time": item.get("end_time"),
-                "best_user_id": None,
-                "best_user_email": None,
-                "best_user_embedding_id": None,
-                "best_reference_image_url": None,
-                "distance": None,
-                "similarity": None,
-                "is_match_under_threshold": False,
-            }
-            for item in video_embeddings
-        ]
-
-    if pool_reference_images and debug_frames:
-        debug_frame_items = [item for item in debug_frames if item.get("embedding") is not None]
-        if debug_frame_items:
-            user_vectors = [item["embedding"] for item in pool_reference_images]
-            frame_distances = pairwise_euclidean_distances(
-                [item["embedding"] for item in debug_frame_items],
-                user_vectors,
-            )
-            frame_similarities = pairwise_cosine_similarity(
-                [item["embedding"] for item in debug_frame_items],
-                user_vectors,
-            )
-
-            for frame_index, frame in enumerate(debug_frame_items):
-                best_match_index = int(frame_distances[frame_index].argmin())
-                reference_image = pool_reference_images[best_match_index]
-                debug_frame_results.append(
-                    {
-                        "debug_frame_id": frame["debug_frame_id"],
-                        "track_id": frame["track_id"],
-                        "frame_index": frame["frame_index"],
-                        "frame_timestamp": frame.get("frame_timestamp"),
-                        "image_url": frame.get("image_url"),
-                        "bbox": frame.get("bbox"),
-                        "face_bbox": frame.get("face_bbox"),
-                        "has_face": frame.get("has_face", False),
-                        "is_valid": frame.get("is_valid", False),
-                        "used_for_embedding": frame.get("used_for_embedding", False),
-                        "user_id": reference_image["user_id"],
-                        "user_email": reference_image["email"],
-                        "user_embedding_id": reference_image["user_embedding_id"],
-                        "distance": float(frame_distances[frame_index, best_match_index]),
-                        "similarity": float(frame_similarities[frame_index, best_match_index]),
-                        "is_match_under_threshold": float(frame_distances[frame_index, best_match_index]) <= threshold,
-                    }
-                )
-
-        frames_without_embeddings = [item for item in debug_frames if item.get("embedding") is None]
-        debug_frame_results.extend(
-            [
-                {
-                    "debug_frame_id": frame["debug_frame_id"],
-                    "track_id": frame["track_id"],
-                    "frame_index": frame["frame_index"],
-                    "frame_timestamp": frame.get("frame_timestamp"),
-                    "image_url": frame.get("image_url"),
-                    "bbox": frame.get("bbox"),
-                    "face_bbox": frame.get("face_bbox"),
-                    "has_face": frame.get("has_face", False),
-                    "is_valid": frame.get("is_valid", False),
-                    "used_for_embedding": frame.get("used_for_embedding", False),
-                    "user_id": None,
-                    "user_email": None,
-                    "user_embedding_id": None,
-                    "distance": None,
-                    "similarity": None,
-                    "is_match_under_threshold": False,
-                }
-                for frame in frames_without_embeddings
-            ]
-        )
-    else:
-        debug_frame_results = [
-            {
-                "debug_frame_id": frame["debug_frame_id"],
-                "track_id": frame["track_id"],
-                "frame_index": frame["frame_index"],
-                "frame_timestamp": frame.get("frame_timestamp"),
-                "image_url": frame.get("image_url"),
-                "bbox": frame.get("bbox"),
-                "face_bbox": frame.get("face_bbox"),
-                "has_face": frame.get("has_face", False),
-                "is_valid": frame.get("is_valid", False),
-                "used_for_embedding": frame.get("used_for_embedding", False),
-                "user_id": None,
-                "user_email": None,
-                "user_embedding_id": None,
-                "distance": None,
-                "similarity": None,
-                "is_match_under_threshold": False,
-            }
-            for frame in debug_frames
-        ]
-
-    debug_frame_results.sort(
-        key=lambda item: (
-            item["track_id"],
-            item["frame_index"],
-        )
+    thresholds = _match_thresholds(request)
+    constraints = _matching_constraints(request)
+    matching_attempts = (
+        ((video.get("diagnostics") or {}).get("matching_service") or {}).get("tracks")
+        or {}
     )
-
-    best_reference_image_url = None
-    best_reference_user_embedding_id = None
-    best_match_user_id = None
-    best_match_user_email = None
-    if comparisons:
-        best_reference_user_embedding_id = comparisons[0]["user_embedding_id"]
-        best_match_user_id = comparisons[0]["user_id"]
-        best_match_user_email = comparisons[0]["user_email"]
-        best_reference = next(
-            (
-                item
-                for item in pool_reference_images
-                if item["user_embedding_id"] == best_reference_user_embedding_id
-            ),
-            None,
-        )
-        best_reference_image_url = None if best_reference is None else best_reference.get("source_image_url")
-    elif pool_reference_images:
-        latest_reference = next(
-            (item for item in reversed(pool_reference_images) if item.get("source_image_url")),
-            None,
-        )
-        if latest_reference is not None:
-            best_reference_user_embedding_id = latest_reference["user_embedding_id"]
-            best_match_user_id = latest_reference["user_id"]
-            best_match_user_email = latest_reference["email"]
-            best_reference_image_url = latest_reference.get("source_image_url")
-
     matches = request.app.state.db.list_matches_for_video(video_id=video_id, pool_id=pool_id)
-    assigned_user = user_lookup.get(video.get("assigned_user_id")) if video.get("assigned_user_id") else None
-
-    return {
-        "video_id": video_id,
-        "pool_id": video.get("pool_id"),
-        "pool": _serialize_pool(request.app.state.db.get_pool(video.get("pool_id"))),
-        "pool_users": len(pool_users),
-        "user_embeddings": len(pool_reference_images),
-        "video_embeddings": len(video_embeddings),
-        "comparisons": comparisons,
-        "best_match_user_id": best_match_user_id,
-        "best_match_user_email": best_match_user_email,
-        "best_reference_user_embedding_id": best_reference_user_embedding_id,
-        "best_reference_image_url": best_reference_image_url,
-        "reference_images": [
-            {
-                "user_embedding_id": item["user_embedding_id"],
-                "user_id": item["user_id"],
-                "user_email": item["email"],
-                "image_url": item.get("source_image_url"),
-                "created_at": item.get("created_at"),
-            }
-            for item in pool_reference_images
-            if item.get("source_image_url")
-        ],
-        "video_frames": video_frames,
-        "debug_frames": debug_frame_results,
-        "matches": matches,
-        "assigned_user_id": video.get("assigned_user_id"),
-        "assigned_user_email": None if assigned_user is None else assigned_user["email"],
-        "summary": {
-            "total_frames": len(debug_frame_results),
-            "valid_frames": sum(1 for item in debug_frame_results if item.get("is_valid")),
-            "best_similarity": None if not comparisons else comparisons[0]["similarity"],
-            "best_distance": None if not comparisons else comparisons[0]["distance"],
-            "force_match": bool(
-                comparisons
-                and comparisons[0]["similarity"] > 0.82
-                and comparisons[0]["distance"] < threshold
-            ),
-        },
-        "threshold": threshold,
-    }
+    return build_debug_compare_response(
+        video_id=video_id,
+        video=video,
+        pool=_serialize_pool(request.app.state.db.get_pool(video.get("pool_id"))),
+        pool_users=pool_users,
+        pool_reference_images=pool_reference_images,
+        video_embeddings=video_embeddings,
+        frame_embeddings=list(frame_embeddings_lookup.values()),
+        debug_frames=debug_frames,
+        matches=matches,
+        similarity_threshold=thresholds["min_similarity"],
+        margin_threshold=thresholds["min_margin"],
+        min_track_embeddings=int(constraints["min_track_embeddings"]),
+        min_track_consistency=float(constraints["min_track_consistency"]),
+        matching_attempts=matching_attempts,
+    )
 
 
 def _build_video_debug_summary(
@@ -381,6 +347,7 @@ def _build_video_debug_summary(
         "assigned_user_id": compare_response["assigned_user_id"],
         "assigned_user_email": compare_response["assigned_user_email"],
         "threshold": compare_response["threshold"],
+        "margin_threshold": compare_response.get("margin_threshold"),
     }
 
 
@@ -443,40 +410,83 @@ async def upload_video(
     video_id = str(uuid.uuid4())
     _, extension = os.path.splitext(file.filename or "")
     object_key = f"uploads/videos/{video_id}{extension or '.mp4'}"
+    upload_started_at = datetime.now(timezone.utc).isoformat()
+    planned_s3_path = (
+        f"s3://{request.app.state.media_service.default_bucket}/{object_key}"
+    )
+    video_record = request.app.state.pipeline_store.create_video(
+        video_id=video_id,
+        s3_path=planned_s3_path,
+        status="uploaded",
+        pool_id=current_user["pool_id"],
+    )
 
     try:
-        s3_path = request.app.state.media_service.upload_bytes(
+        s3_upload_started_at = datetime.now(timezone.utc).isoformat()
+        request.app.state.media_service.upload_bytes(
             data=video_bytes,
             key=object_key,
             content_type=file.content_type,
         )
-        video_record = request.app.state.pipeline_store.create_video(
-            video_id=video_id,
-            s3_path=s3_path,
-            status="uploaded",
-            pool_id=current_user["pool_id"],
+        upload_completed_at = datetime.now(timezone.utc).isoformat()
+        request.app.state.pipeline_store.update_video_diagnostics(
+            video_id,
+            {
+                "ingestion_service": {
+                    "upload_started_at": upload_started_at,
+                    "s3_upload_started_at": s3_upload_started_at,
+                    "upload_completed_at": upload_completed_at,
+                    "upload_seconds": _duration_seconds(upload_started_at, upload_completed_at),
+                    "file_name": file.filename,
+                    "file_size_bytes": len(video_bytes),
+                }
+            },
         )
 
-        request.app.state.admin_sqs_client.send_message(
+        queue_response = request.app.state.admin_sqs_client.send_message(
             QueueUrl=queue_url,
             MessageBody=json.dumps(
                 {
                     "video_id": video_id,
                     "pool_id": current_user["pool_id"],
-                    "s3_path": s3_path,
+                    "s3_path": planned_s3_path,
                     "type": "video",
                     "timestamp": video_record["created_at"],
                 }
             ),
         )
+        request.app.state.pipeline_store.update_video_diagnostics(
+            video_id,
+            {
+                "ingestion_service": {
+                    "queued_at": upload_completed_at,
+                    "queue_message_id": queue_response.get("MessageId"),
+                }
+            },
+        )
     except Exception as exc:
         logger.error("Video upload failed for admin user %s: %s", current_user["user_id"], exc, exc_info=True)
+        request.app.state.pipeline_store.update_video_diagnostics(
+            video_id,
+            {
+                "ingestion_service": {
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error": str(exc),
+                }
+            },
+        )
         request.app.state.pipeline_store.update_video_status(
             video_id,
             "failed",
             error_message=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Unable to upload and queue video") from exc
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Unable to upload and queue video",
+                "video_id": video_id,
+            },
+        ) from exc
 
     logger.info(
         "Video queued: video_id=%s user_id=%s pool_id=%s",
@@ -523,6 +533,7 @@ def list_cameras(
 @router.get("/videos")
 def list_videos(
     request: Request,
+    include_debug: bool = Query(True),
     current_user: dict = Depends(require_admin),
 ) -> list[dict]:
     if not current_user.get("pool_id"):
@@ -534,10 +545,15 @@ def list_videos(
         {
             **video,
             "source_video_url": media.get_presigned_url(video.get("s3_path")),
-            **_build_video_debug_summary(
-                request,
-                video_id=video["video_id"],
-                pool_id=current_user["pool_id"],
+            **_build_video_pipeline_summary(request, video=video),
+            **(
+                _build_video_debug_summary(
+                    request,
+                    video_id=video["video_id"],
+                    pool_id=current_user["pool_id"],
+                )
+                if include_debug
+                else {}
             ),
         }
         for video in videos
@@ -555,6 +571,223 @@ def debug_compare_video(
         video_id=video_id,
         pool_id=current_user.get("pool_id"),
     )
+
+
+@router.get("/config")
+def get_system_config(
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, int | float]:
+    _ = current_user
+    return _runtime_config(request)
+
+
+@router.get("/config/status")
+def get_system_config_status(
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    _ = current_user
+    return request.app.state.system_config.get_update_guard_state()
+
+
+@router.put("/config")
+def update_system_config(
+    payload: dict[str, float],
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, int | float]:
+    if not payload:
+        raise HTTPException(status_code=400, detail="At least one config value is required")
+
+    unsupported_keys = sorted(key for key in payload if key not in SYSTEM_CONFIG_DEFINITIONS)
+    if unsupported_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported config keys: {', '.join(unsupported_keys)}",
+        )
+
+    try:
+        return request.app.state.system_config.update_config(
+            payload,
+            updated_by=current_user.get("email") or current_user["user_id"],
+            admin_id=current_user["user_id"],
+        )
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/config/history")
+def get_system_config_history(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(require_admin),
+) -> list[dict[str, Any]]:
+    _ = current_user
+    return request.app.state.system_config.list_change_history(limit=limit)
+
+
+@router.post("/config/rollback")
+def rollback_system_config(
+    payload: ConfigRollbackRequest,
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    try:
+        return request.app.state.system_config.rollback_config(
+            updated_by=current_user.get("email") or current_user["user_id"],
+            admin_id=current_user["user_id"],
+            batch_id=payload.batch_id,
+            audit_id=payload.audit_id,
+            key=payload.key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/metrics")
+def get_admin_metrics(
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    _ = current_user
+    matching_metrics = request.app.state.pipeline_store.get_metrics(prefix="matching.")
+    embedding_metrics = request.app.state.pipeline_store.get_metrics(prefix="embedding.")
+    stats = request.app.state.db.get_match_statistics(pool_id=current_user.get("pool_id"))
+    videos = request.app.state.pipeline_store.list_videos(pool_id=current_user.get("pool_id"))
+    video_summaries = [
+        {
+            "video_id": video["video_id"],
+            "created_at": video["created_at"],
+            "status": video["status"],
+            **_build_video_pipeline_summary(request, video=video),
+        }
+        for video in videos
+    ]
+    total_processed = sum(int(item["tracks_processed"]) for item in video_summaries)
+    total_unmatched = sum(int(item["tracks_unmatched"]) for item in video_summaries)
+    return {
+        "matching": {
+            **matching_metrics,
+            **embedding_metrics,
+            "average_match_similarity": stats["average_similarity"],
+            "average_match_margin": stats["average_margin"],
+            "rejection_rate": 0.0
+            if total_processed == 0
+            else round((total_unmatched / total_processed) * 100.0, 2),
+        },
+        "videos": {
+            "matches_per_video": [
+                {
+                    "video_id": item["video_id"],
+                    "status": item["status"],
+                    "matches_count": item["matches_count"],
+                    "tracks_matched": item["tracks_matched"],
+                    "tracks_unmatched": item["tracks_unmatched"],
+                    "progress_percent": item["progress_percent"],
+                    "avg_similarity": item["avg_similarity"],
+                    "avg_margin": item["avg_margin"],
+                }
+                for item in video_summaries
+            ],
+        },
+        "jobs": request.app.state.pipeline_store.list_recent_jobs(limit=25),
+        "config_status": request.app.state.system_config.get_update_guard_state(),
+        "gateway": request.app.state.metrics.snapshot(),
+    }
+
+
+@router.post("/compare-faces")
+async def compare_faces(
+    request: Request,
+    file1: UploadFile = File(...),
+    file2: UploadFile = File(...),
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    _ = current_user
+
+    image_a = await file1.read()
+    image_b = await file2.read()
+    if not image_a or not image_b:
+        raise HTTPException(status_code=400, detail="Both face images are required")
+
+    try:
+        face_service = request.app.state.get_face_service()
+    except RuntimeError as exc:
+        logger.error("Face comparison requested while face service is unavailable: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Face service is unavailable") from exc
+
+    try:
+        result_a = face_service.extract_embedding(
+            image_a,
+            allow_multiple_faces=True,
+        )
+        result_b = face_service.extract_embedding(
+            image_b,
+            allow_multiple_faces=True,
+        )
+    except FaceUploadError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+    similarity = float(
+        pairwise_cosine_similarity(
+            [result_a["embedding"]],
+            [result_b["embedding"]],
+        )[0, 0]
+    )
+    thresholds = _match_thresholds(request)
+    constraints = _matching_constraints(request)
+    candidate_embeddings = normalize_embeddings([result_b["embedding"]])
+    evaluation = evaluate_track_match(
+        track_embedding=result_a["embedding"],
+        users=[
+            {
+                "user_id": "calibration-target",
+                "email": "Calibration target",
+                "embedding_ids": ["calibration-target"],
+                "embeddings": candidate_embeddings,
+                "avg_embedding": candidate_embeddings[0],
+            }
+        ],
+        similarity_threshold=thresholds["min_similarity"],
+        margin_threshold=thresholds["min_margin"],
+        min_track_embeddings=int(constraints["min_track_embeddings"]),
+        min_track_consistency=float(constraints["min_track_consistency"]),
+        evidence_count=max(1, int(constraints["min_track_embeddings"])),
+        payload_consistency=1.0,
+        quality_avg=None,
+    )
+    decision = evaluation.decision
+    margin_warning = None
+    if similarity < 0.6:
+        margin_warning = "Similarity is below 0.60. These thresholds are likely unrealistic for a reliable match."
+    return {
+        "similarity": similarity,
+        "distance": None if decision.best_similarity is None else float(1.0 - decision.best_similarity),
+        "best_similarity": decision.best_similarity,
+        "second_best_similarity": decision.second_best_similarity,
+        "margin": decision.margin,
+        "passes_similarity": decision.passes_similarity,
+        "passes_margin": decision.passes_margin,
+        "passes_margin_estimate": decision.passes_margin,
+        "estimated_margin": decision.margin,
+        "final_verdict": decision.final_verdict,
+        "rejection_reason": decision.decision_reason,
+        "decision_reason": decision.decision_reason,
+        "explanation": decision.explanation,
+        "decision_explanation": decision.explanation,
+        "verdict": decision.final_verdict,
+        "threshold": decision.threshold_used,
+        "threshold_used": decision.threshold_used,
+        "margin_threshold": decision.margin_threshold_used,
+        "margin_threshold_used": decision.margin_threshold_used,
+        "thresholds": thresholds,
+        "warning": margin_warning,
+        "comparison_mode": "single_reference_matcher_path",
+    }
 
 
 @router.post("/videos/{video_id}/assign")
@@ -611,7 +844,7 @@ def trigger_video_processing(
     queued_at = datetime.now(timezone.utc).isoformat()
     try:
         request.app.state.pipeline_store.update_video_status(video_id, "uploaded")
-        request.app.state.admin_sqs_client.send_message(
+        queue_response = request.app.state.admin_sqs_client.send_message(
             QueueUrl=queue_url,
             MessageBody=json.dumps(
                 {
@@ -622,6 +855,16 @@ def trigger_video_processing(
                     "timestamp": queued_at,
                 }
             ),
+        )
+        request.app.state.pipeline_store.update_video_diagnostics(
+            video_id,
+            {
+                "ingestion_service": {
+                    "requeued_at": queued_at,
+                    "queued_at": queued_at,
+                    "queue_message_id": queue_response.get("MessageId"),
+                }
+            },
         )
     except Exception as exc:
         logger.error("Failed to requeue video %s by user %s: %s", video_id, current_user["user_id"], exc, exc_info=True)
@@ -638,4 +881,57 @@ def trigger_video_processing(
         "status": "uploaded",
         "queued_at": queued_at,
         "message": "Video queued for processing",
+    }
+
+
+@router.post("/rematch-pool")
+def rematch_pool(
+    request: Request,
+    current_user: dict = Depends(require_admin),
+) -> dict:
+    pool_id = current_user.get("pool_id")
+    if not pool_id:
+        raise HTTPException(status_code=400, detail="Select an active pool before rematching")
+
+    queue_url = request.app.state.matching_queue_url
+    if not queue_url:
+        raise HTTPException(status_code=500, detail="Matching queue is not configured")
+
+    queued_at = datetime.now(timezone.utc).isoformat()
+    try:
+        request.app.state.admin_backfill_rate_limiter.check(
+            f"admin-rematch:{current_user['user_id']}:{pool_id}",
+            code="backfill_rate_limited",
+            message="Too many backfill triggers. Please wait before queueing another pool rematch.",
+        )
+    except HTTPException as exc:
+        raise HTTPException(status_code=429, detail=exc.detail) from exc
+
+    try:
+        request.app.state.admin_sqs_client.send_message(
+            QueueUrl=queue_url,
+            MessageBody=json.dumps(
+                {
+                    "job_type": "rematch_pool_tracks",
+                    "job_id": str(uuid.uuid4()),
+                    "pool_id": pool_id,
+                    "batch_size": 100,
+                    "queued_at": queued_at,
+                }
+            ),
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to queue rematch for pool_id=%s user_id=%s: %s",
+            pool_id,
+            current_user["user_id"],
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Unable to queue pool rematch") from exc
+
+    return {
+        "pool_id": pool_id,
+        "queued_at": queued_at,
+        "message": "Pool rematch queued",
     }

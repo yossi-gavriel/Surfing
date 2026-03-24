@@ -19,9 +19,11 @@ class FFmpegRunner:
     def start(self):
         """Starts the FFmpeg process to record chunks."""
         self._running = True
+        is_rtsp_source = self.rtsp_url.strip().lower().startswith("rtsp://")
         
         while self._running:
-            logger.info(f"[{self.camera_id}] Starting FFmpeg process for RTSP stream")
+            source_label = "RTSP stream" if is_rtsp_source else "local/file source"
+            logger.info(f"[{self.camera_id}] Starting FFmpeg process for {source_label}")
             
             # strftime format matches: cam1_YYYYMMDD_HHMMSS.ts
             output_pattern = os.path.join(self.output_dir, f"{self.camera_id}_%Y%m%d_%H%M%S.ts")
@@ -29,15 +31,20 @@ class FFmpegRunner:
             cmd = [
                 "ffmpeg",
                 "-y",
-                "-rtsp_transport", "tcp",
-                "-i", self.rtsp_url,
-                "-c", "copy",
-                "-f", "segment",
-                "-segment_time", str(self.chunk_duration),
-                "-reset_timestamps", "1",
-                "-strftime", "1",
-                output_pattern
             ]
+            if is_rtsp_source:
+                cmd.extend(["-rtsp_transport", "tcp"])
+            cmd.extend(
+                [
+                    "-i", self.rtsp_url,
+                    "-c", "copy",
+                    "-f", "segment",
+                    "-segment_time", str(self.chunk_duration),
+                    "-reset_timestamps", "1",
+                    "-strftime", "1",
+                    output_pattern,
+                ]
+            )
             
             try:
                 self.process = subprocess.Popen(
@@ -51,6 +58,9 @@ class FFmpegRunner:
                 self.process.communicate()
                 
                 if self._running:
+                    if not is_rtsp_source:
+                        logger.info(f"[{self.camera_id}] File source processing completed")
+                        break
                     logger.warning(f"[{self.camera_id}] FFmpeg process exited unexpectedly. Restarting in 5s...")
                     time.sleep(5)
             except Exception as e:

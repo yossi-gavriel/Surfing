@@ -6,6 +6,10 @@ class FrameProcessorConfig:
         self.s3_bucket = os.environ.get("S3_BUCKET")
         self.input_sqs_url = os.environ.get("INPUT_SQS_URL")
         self.output_sqs_url = os.environ.get("OUTPUT_SQS_URL")
+        self.dlq_sqs_url = os.environ.get("FRAME_PROCESSOR_DLQ_SQS_URL")
+        self.max_receive_count = int(os.environ.get("FRAME_PROCESSOR_MAX_RECEIVE_COUNT", "5"))
+        self.worker_lease_ttl_seconds = int(os.environ.get("FRAME_PROCESSOR_LEASE_TTL_SECONDS", "60"))
+        self.metrics_log_interval = int(os.environ.get("FRAME_PROCESSOR_METRICS_LOG_INTERVAL", "25"))
         
         self.redis_host = os.environ.get("REDIS_HOST", "redis")
         self.redis_port = int(os.environ.get("REDIS_PORT", "6379"))

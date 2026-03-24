@@ -31,7 +31,18 @@ class FaceUploadService:
         )
         self.face_app.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
-    def extract_embedding(self, image_bytes: bytes) -> dict[str, float | list[float]]:
+    def extract_embedding(
+        self,
+        image_bytes: bytes,
+        *,
+        allow_multiple_faces: bool = False,
+    ) -> dict[str, float | list[float]]:
+        image = self._decode_image(image_bytes)
+        faces = self.face_app.get(image)
+        face = self._select_face(faces, allow_multiple_faces=allow_multiple_faces)
+        return self._build_embedding_result(image, face, faces_detected=len(faces))
+
+    def _decode_image(self, image_bytes: bytes) -> np.ndarray:
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None:
@@ -39,20 +50,36 @@ class FaceUploadService:
                 code="bad_image",
                 message="Unsupported or invalid image file",
             )
+        return image
 
-        faces = self.face_app.get(image)
+    def _select_face(self, faces, *, allow_multiple_faces: bool):
         if len(faces) == 0:
             raise FaceUploadError(
                 code="no_face_detected",
                 message="No face detected in the uploaded image",
             )
-        if len(faces) > 1:
+        if len(faces) > 1 and not allow_multiple_faces:
             raise FaceUploadError(
                 code="multiple_faces_detected",
                 message="Upload an image with exactly one face",
             )
+        if len(faces) == 1:
+            return faces[0]
+        return max(
+            faces,
+            key=lambda face: (
+                float(getattr(face, "det_score", 0.0)),
+                float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1])),
+            ),
+        )
 
-        face = faces[0]
+    def _build_embedding_result(
+        self,
+        image: np.ndarray,
+        face,
+        *,
+        faces_detected: int,
+    ) -> dict[str, float | int | list[float]]:
         x1, y1, x2, y2 = [int(value) for value in face.bbox]
         face_size = max(x2 - x1, y2 - y1)
         if face_size < self.min_face_size:
@@ -92,6 +119,7 @@ class FaceUploadService:
             "face_size": float(face_size),
             "blur_score": float(blur_score),
             "det_score": float(face.det_score),
+            "faces_detected": int(faces_detected),
         }
 
     def _get_blur_score(self, image: np.ndarray, bbox: np.ndarray) -> float:

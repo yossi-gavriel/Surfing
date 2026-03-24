@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+.idea/
+surf-ai-system/artifacts/
+surf-ai-system/ssm_*.json

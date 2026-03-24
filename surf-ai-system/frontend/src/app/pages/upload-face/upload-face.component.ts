@@ -1,10 +1,11 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { Component, inject, signal } from '@angular/core';
+import { Component, DestroyRef, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 
 import { AuthService, MeResponse } from '../../core/auth.service';
+import { I18nService } from '../../core/i18n.service';
 
 interface PoolOption {
   id: string;
@@ -19,6 +20,24 @@ interface ReferenceImage {
   created_at: string;
 }
 
+interface BackfillStatusResponse {
+  status: 'idle' | 'running' | 'done' | 'failed';
+  message: string;
+  job_ids: string[];
+  jobs_total: number;
+  jobs_completed: number;
+  jobs_failed: number;
+  jobs_running: number;
+  jobs_pending: number;
+}
+
+interface ReferenceImageUploadResponse {
+  uploaded: number;
+  message: string;
+  backfill_job_ids?: string[];
+  backfill_status?: BackfillStatusResponse;
+}
+
 @Component({
   selector: 'app-upload-face-page',
   standalone: true,
@@ -26,38 +45,37 @@ interface ReferenceImage {
   template: `
     <section class="page-grid">
       <article class="panel">
-        <p class="eyebrow">Profile</p>
-        <h2>Pool membership and reference images.</h2>
-        <p>
-          Choose the pool you belong to, upload multiple reference photos, and manage the images the
-          matcher uses for your account.
-        </p>
+        <p class="eyebrow">{{ i18n.t('uploadFace.profileEyebrow') }}</p>
+        <h2>{{ i18n.t('uploadFace.profileTitle') }}</h2>
+        <p>{{ i18n.t('uploadFace.profileSubtitle') }}</p>
 
         <label class="field">
-          <span>My pool</span>
-          <select [(ngModel)]="selectedPoolId">
-            <option [ngValue]="''">Choose a pool</option>
+          <span>{{ i18n.t('uploadFace.myPool') }}</span>
+          <select [ngModel]="selectedPoolId" (ngModelChange)="onPoolSelectionChange($event)">
+            <option [ngValue]="''">{{ i18n.t('common.choosePool') }}</option>
             <option *ngFor="let pool of pools()" [ngValue]="pool.pool_id">{{ pool.name }}</option>
           </select>
         </label>
 
         <div class="actions">
           <button type="button" (click)="savePool()" [disabled]="savingPool() || !selectedPoolId">
-            {{ savingPool() ? 'Saving...' : 'Save pool' }}
+            {{ savingPool() ? i18n.t('common.saving') : i18n.t('uploadFace.savePool') }}
           </button>
-          <button class="secondary" type="button" (click)="goToVideos()">My videos</button>
+          <button class="secondary" type="button" (click)="goToVideos()">
+            {{ i18n.t('nav.myVideos') }}
+          </button>
         </div>
       </article>
 
       <article class="panel">
-        <p class="eyebrow">Reference images</p>
-        <h2>Upload clear face photos.</h2>
-        <p>Multiple uploads are supported. The newest valid images are kept as your active references.</p>
+        <p class="eyebrow">{{ i18n.t('uploadFace.referenceEyebrow') }}</p>
+        <h2>{{ i18n.t('uploadFace.referenceTitle') }}</h2>
+        <p>{{ i18n.t('uploadFace.referenceSubtitle') }}</p>
 
         <label class="dropzone">
           <input type="file" accept="image/*" multiple (change)="onFilesSelected($event)" />
-          <span>{{ selectedFilesLabel() || 'Choose one or more images' }}</span>
-          <small>Exactly one face per image, well lit, close-up, and not blurry.</small>
+          <span>{{ selectedFilesLabel() || i18n.t('uploadFace.chooseImages') }}</span>
+          <small>{{ i18n.t('uploadFace.chooseImagesHint') }}</small>
         </label>
 
         <div class="preview-grid" *ngIf="previewUrls().length > 0">
@@ -66,41 +84,46 @@ interface ReferenceImage {
 
         <div class="actions">
           <button type="button" (click)="upload()" [disabled]="selectedFiles().length === 0 || uploading()">
-            {{ uploading() ? 'Uploading...' : 'Upload reference images' }}
+            {{ uploading() ? i18n.t('common.uploading') : i18n.t('uploadFace.uploadReferenceImages') }}
           </button>
-          <button class="secondary" type="button" (click)="refresh()">Refresh</button>
+          <button class="secondary" type="button" (click)="refresh()">
+            {{ i18n.t('common.refresh') }}
+          </button>
         </div>
       </article>
     </section>
 
     <section class="feedback success" *ngIf="successMessage()">{{ successMessage() }}</section>
     <section class="feedback error" *ngIf="errorMessage()">{{ errorMessage() }}</section>
+    <section class="feedback" *ngIf="backfillMessage()" [class.success]="backfillStatus() === 'done'" [class.error]="backfillStatus() === 'failed'">
+      {{ backfillMessage() }}
+    </section>
 
     <section class="panel gallery-panel">
       <div class="gallery-header">
         <div>
-          <p class="eyebrow">Gallery</p>
-          <h2>My reference images</h2>
+          <p class="eyebrow">{{ i18n.t('uploadFace.galleryEyebrow') }}</p>
+          <h2>{{ i18n.t('uploadFace.galleryTitle') }}</h2>
         </div>
-        <span class="count-pill">{{ referenceImages().length }} stored</span>
+        <span class="count-pill">{{ i18n.t('uploadFace.storedCount', { count: referenceImages().length }) }}</span>
       </div>
 
-      <div class="empty" *ngIf="referenceImages().length === 0">No reference images uploaded yet.</div>
+      <div class="empty" *ngIf="referenceImages().length === 0">{{ i18n.t('uploadFace.empty') }}</div>
 
       <div class="gallery-grid" *ngIf="referenceImages().length > 0">
         <article class="image-card" *ngFor="let image of referenceImages(); let index = index">
           <img *ngIf="image.image_url; else missingImage" [src]="image.image_url" alt="Reference image" />
           <ng-template #missingImage>
-            <div class="placeholder">Image unavailable</div>
+            <div class="placeholder">{{ i18n.t('common.imageUnavailable') }}</div>
           </ng-template>
 
           <div class="image-copy">
-            <strong>{{ index === 0 ? 'Oldest retained' : index === referenceImages().length - 1 ? 'Newest retained' : 'Reference image' }}</strong>
+            <strong>{{ imageTitle(index) }}</strong>
             <span>{{ formatTimestamp(image.created_at) }}</span>
           </div>
 
           <button class="danger" type="button" (click)="deleteImage(image.reference_image_id)">
-            Delete
+            {{ i18n.t('common.delete') }}
           </button>
         </article>
       </div>
@@ -297,6 +320,8 @@ export class UploadFaceComponent {
   private readonly http = inject(HttpClient);
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  private readonly destroyRef = inject(DestroyRef);
+  protected readonly i18n = inject(I18nService);
 
   readonly pools = signal<PoolOption[]>([]);
   readonly referenceImages = signal<ReferenceImage[]>([]);
@@ -306,9 +331,18 @@ export class UploadFaceComponent {
   readonly savingPool = signal(false);
   readonly successMessage = signal('');
   readonly errorMessage = signal('');
-  selectedPoolId = '';
+  readonly backfillStatus = signal<'idle' | 'running' | 'done' | 'failed'>('idle');
+  readonly backfillMessage = signal('');
+  selectedPoolId = this.auth.selectedPoolId() ?? this.auth.poolId() ?? '';
+  private backfillPollHandle: number | null = null;
+  private backfillPollInFlight = false;
+  private backfillJobIds: string[] = [];
 
   constructor() {
+    this.destroyRef.onDestroy(() => {
+      this.stopBackfillPolling();
+      this.previewUrls().forEach((url) => URL.revokeObjectURL(url));
+    });
     this.refresh();
   }
 
@@ -326,7 +360,9 @@ export class UploadFaceComponent {
       .subscribe({
         next: (response) => {
           this.auth.setProfile(response);
-          this.selectedPoolId = response.pool_id ?? '';
+          if (response.pool_id) {
+            this.selectedPoolId = response.pool_id;
+          }
         },
         error: (error) => this.handleUnauthorized(error),
       });
@@ -339,7 +375,7 @@ export class UploadFaceComponent {
       })
       .subscribe({
         next: (response) => this.pools.set(response),
-        error: (error) => this.handleError(error, 'Unable to load pools.'),
+        error: (error) => this.handleError(error, 'uploadFace.loadPoolsFailed'),
       });
   }
 
@@ -350,17 +386,28 @@ export class UploadFaceComponent {
       })
       .subscribe({
         next: (response) => this.referenceImages.set(response),
-        error: (error) => this.handleError(error, 'Unable to load reference images.'),
+        error: (error) => this.handleError(error, 'uploadFace.loadReferenceImagesFailed'),
       });
   }
 
   onFilesSelected(event: Event): void {
     const input = event.target as HTMLInputElement;
     const files = Array.from(input.files ?? []);
+    this.previewUrls().forEach((url) => URL.revokeObjectURL(url));
     this.selectedFiles.set(files);
     this.successMessage.set('');
     this.errorMessage.set('');
+    this.backfillMessage.set('');
+    this.backfillStatus.set('idle');
     this.previewUrls.set(files.map((file) => URL.createObjectURL(file)));
+  }
+
+  onPoolSelectionChange(poolId: string): void {
+    this.selectedPoolId = poolId || '';
+    this.auth.setSelectedPoolId(this.selectedPoolId || null);
+    this.successMessage.set('');
+    this.errorMessage.set('');
+    this.backfillMessage.set('');
   }
 
   selectedFilesLabel(): string {
@@ -369,9 +416,9 @@ export class UploadFaceComponent {
       return '';
     }
     if (files.length === 1) {
-      return files[0].name;
+      return this.i18n.t('uploadFace.filesSelected.single', { name: files[0].name });
     }
-    return `${files.length} images selected`;
+    return this.i18n.t('uploadFace.filesSelected.multiple', { count: files.length });
   }
 
   savePool(): void {
@@ -390,12 +437,13 @@ export class UploadFaceComponent {
       .subscribe({
         next: (response) => {
           this.auth.setProfile(response);
+          this.auth.setSelectedPoolId(response.pool_id);
           this.savingPool.set(false);
-          this.successMessage.set('Pool updated successfully.');
+          this.successMessage.set(this.i18n.t('uploadFace.poolUpdated'));
         },
         error: (error) => {
           this.savingPool.set(false);
-          this.handleError(error, 'Unable to update pool.');
+          this.handleError(error, 'uploadFace.updatePoolFailed');
         },
       });
   }
@@ -406,31 +454,51 @@ export class UploadFaceComponent {
       return;
     }
 
-    this.uploading.set(true);
-    this.successMessage.set('');
-    this.errorMessage.set('');
+    this.ensurePoolSynced(() => {
+      this.uploading.set(true);
+      this.successMessage.set('');
+      this.errorMessage.set('');
+      this.stopBackfillPolling();
+      this.backfillMessage.set('');
+      this.backfillStatus.set('idle');
 
-    const formData = new FormData();
-    files.forEach((file) => formData.append('files', file));
+      const formData = new FormData();
+      files.forEach((file) => formData.append('files', file));
 
-    this.http
-      .post<{ uploaded: number; message: string }>('/api/me/reference-images', formData, {
-        headers: this.auth.authHeaders(),
-      })
-      .subscribe({
-        next: (response) => {
-          this.uploading.set(false);
-          this.successMessage.set(`${response.message}. Uploaded ${response.uploaded}.`);
-          this.selectedFiles.set([]);
-          this.previewUrls.set([]);
-          this.loadReferenceImages();
-          this.loadMe();
-        },
-        error: (error) => {
-          this.uploading.set(false);
-          this.handleError(error, 'Upload failed.');
-        },
-      });
+      this.http
+        .post<ReferenceImageUploadResponse>('/api/me/reference-images', formData, {
+          headers: this.auth.authHeaders(),
+        })
+        .subscribe({
+          next: (response) => {
+            this.uploading.set(false);
+            this.successMessage.set(this.i18n.t('uploadFace.uploadSucceeded', { count: response.uploaded }));
+            this.selectedFiles.set([]);
+            this.previewUrls().forEach((url) => URL.revokeObjectURL(url));
+            this.previewUrls.set([]);
+            this.loadReferenceImages();
+            this.loadMe();
+            if ((response.backfill_job_ids ?? []).length > 0) {
+              this.backfillJobIds = response.backfill_job_ids ?? [];
+              this.applyBackfillStatus(response.backfill_status ?? {
+                status: 'running',
+                message: 'Backfill running...',
+                job_ids: this.backfillJobIds,
+                jobs_total: this.backfillJobIds.length,
+                jobs_completed: 0,
+                jobs_failed: 0,
+                jobs_running: 0,
+                jobs_pending: this.backfillJobIds.length,
+              });
+              this.startBackfillPolling();
+            }
+          },
+          error: (error) => {
+            this.uploading.set(false);
+            this.handleError(error, 'uploadFace.uploadFailed');
+          },
+        });
+    });
   }
 
   deleteImage(referenceImageId: string): void {
@@ -442,11 +510,11 @@ export class UploadFaceComponent {
       })
       .subscribe({
         next: (response) => {
-          this.successMessage.set(response.message);
+          this.successMessage.set(this.i18n.translateApiMessage(response.message, 'uploadFace.referenceImage'));
           this.loadReferenceImages();
           this.loadMe();
         },
-        error: (error) => this.handleError(error, 'Unable to delete reference image.'),
+        error: (error) => this.handleError(error, 'uploadFace.deleteFailed'),
       });
   }
 
@@ -455,20 +523,126 @@ export class UploadFaceComponent {
   }
 
   formatTimestamp(value: string): string {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+    return this.i18n.formatDateTime(value);
+  }
+
+  imageTitle(index: number): string {
+    if (index === 0) {
+      return this.i18n.t('uploadFace.oldestRetained');
+    }
+    if (index === this.referenceImages().length - 1) {
+      return this.i18n.t('uploadFace.newestRetained');
+    }
+    return this.i18n.t('uploadFace.referenceImage');
+  }
+
+  private ensurePoolSynced(nextAction: () => void): void {
+    if (!this.selectedPoolId) {
+      this.errorMessage.set(this.i18n.t('uploadFace.selectPoolRequired'));
+      return;
+    }
+
+    if (this.selectedPoolId === (this.auth.poolId() ?? '')) {
+      nextAction();
+      return;
+    }
+
+    this.savingPool.set(true);
+    this.successMessage.set('');
+    this.errorMessage.set('');
+
+    this.http
+      .put<MeResponse>('/api/me/pool', { pool_id: this.selectedPoolId }, {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (response) => {
+          this.auth.setProfile(response);
+          this.auth.setSelectedPoolId(response.pool_id);
+          this.savingPool.set(false);
+          nextAction();
+        },
+        error: (error) => {
+          this.savingPool.set(false);
+          this.handleError(error, 'uploadFace.updatePoolFailed');
+        },
+      });
   }
 
   private handleUnauthorized(error: any): void {
     if (error?.status === 401) {
+      this.stopBackfillPolling();
       this.auth.clearSession();
       this.router.navigate(['/login']);
     }
   }
 
-  private handleError(error: any, fallbackMessage: string): void {
+  private startBackfillPolling(): void {
+    if (this.backfillJobIds.length === 0) {
+      return;
+    }
+    if (this.backfillPollHandle !== null) {
+      return;
+    }
+    this.backfillPollHandle = window.setInterval(() => this.pollBackfillStatus(), 3000);
+    this.pollBackfillStatus();
+  }
+
+  private stopBackfillPolling(): void {
+    if (this.backfillPollHandle !== null) {
+      window.clearInterval(this.backfillPollHandle);
+      this.backfillPollHandle = null;
+    }
+    this.backfillPollInFlight = false;
+  }
+
+  private pollBackfillStatus(): void {
+    if (this.backfillPollInFlight || this.backfillJobIds.length === 0) {
+      return;
+    }
+    this.backfillPollInFlight = true;
+    this.http
+      .get<BackfillStatusResponse>(`/api/me/backfill-status?job_ids=${encodeURIComponent(this.backfillJobIds.join(','))}`, {
+        headers: this.auth.authHeaders(),
+      })
+      .subscribe({
+        next: (response) => {
+          this.backfillPollInFlight = false;
+          this.applyBackfillStatus(response);
+          if (response.status === 'done' || response.status === 'failed' || response.status === 'idle') {
+            this.stopBackfillPolling();
+          }
+        },
+        error: (error) => {
+          this.backfillPollInFlight = false;
+          this.backfillStatus.set('failed');
+          this.backfillMessage.set(this.i18n.translateApiMessage(error?.error?.detail, 'uploadFace.backfillFailed'));
+          this.errorMessage.set(this.i18n.translateApiMessage(error?.error?.detail, 'uploadFace.backfillFailed'));
+          this.stopBackfillPolling();
+          this.handleUnauthorized(error);
+        },
+      });
+  }
+
+  private applyBackfillStatus(status: BackfillStatusResponse): void {
+    this.backfillStatus.set(status.status);
+    if (status.status === 'running') {
+      this.backfillMessage.set(this.i18n.t('uploadFace.backfillRunning'));
+      return;
+    }
+    if (status.status === 'done') {
+      this.backfillMessage.set(this.i18n.t('uploadFace.backfillDone'));
+      return;
+    }
+    if (status.status === 'failed') {
+      this.backfillMessage.set(this.i18n.t('uploadFace.backfillFailed'));
+      return;
+    }
+    this.backfillMessage.set('');
+  }
+
+  private handleError(error: any, fallbackKey: Parameters<I18nService['t']>[0]): void {
     this.handleUnauthorized(error);
-    const detail = error?.error?.detail;
-    this.errorMessage.set(detail?.message || detail || fallbackMessage);
+    this.errorMessage.set(this.i18n.translateApiMessage(error?.error?.detail, fallbackKey));
   }
 }

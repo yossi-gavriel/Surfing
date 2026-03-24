@@ -57,6 +57,15 @@ class SQLiteDB:
             )
             self._ensure_column(conn, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
             self._ensure_column(conn, "users", "pool_id", "TEXT")
+            self._create_index_if_columns(
+                conn,
+                table_name="users",
+                required_columns=["pool_id", "user_id"],
+                create_sql="""
+                CREATE INDEX IF NOT EXISTS idx_users_pool_id
+                ON users(pool_id, user_id)
+                """,
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_embeddings (
@@ -97,18 +106,76 @@ class SQLiteDB:
                     distance_max REAL NOT NULL,
                     second_best_score REAL,
                     score_margin REAL,
+                    best_similarity REAL,
+                    second_best_similarity REAL,
+                    margin REAL,
+                    threshold_used REAL,
+                    margin_threshold_used REAL,
+                    decision_reason TEXT,
+                    decision_explanation TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(user_id, track_id)
                 )
                 """
             )
+            self._ensure_column(conn, "matches", "camera_id", "TEXT")
+            self._ensure_column(conn, "matches", "video_id", "TEXT")
+            self._ensure_column(conn, "matches", "source_video_s3", "TEXT")
+            self._ensure_column(conn, "matches", "timestamp", "TEXT")
+            self._ensure_column(conn, "matches", "keyframe", "TEXT")
+            self._ensure_column(conn, "matches", "keyframe_s3", "TEXT")
+            self._ensure_column(conn, "matches", "second_best_score", "REAL")
+            self._ensure_column(conn, "matches", "score_margin", "REAL")
+            self._ensure_column(conn, "matches", "pool_id", "TEXT")
+            self._ensure_column(conn, "matches", "best_similarity", "REAL")
+            self._ensure_column(conn, "matches", "second_best_similarity", "REAL")
+            self._ensure_column(conn, "matches", "margin", "REAL")
+            self._ensure_column(conn, "matches", "threshold_used", "REAL")
+            self._ensure_column(conn, "matches", "margin_threshold_used", "REAL")
+            self._ensure_column(conn, "matches", "decision_reason", "TEXT")
+            self._ensure_column(conn, "matches", "decision_explanation", "TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_matches_user_created
                 ON matches(user_id, created_at DESC)
                 """
             )
-            self._ensure_column(conn, "matches", "pool_id", "TEXT")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matches_track_id
+                ON matches(track_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_matches_track_id
+                ON matches(track_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matches_video_id
+                ON matches(video_id, created_at DESC)
+                """
+            )
+            self._create_index_if_columns(
+                conn,
+                table_name="matches",
+                required_columns=["pool_id", "track_id", "created_at"],
+                create_sql="""
+                CREATE INDEX IF NOT EXISTS idx_matches_pool_track
+                ON matches(pool_id, track_id, created_at DESC)
+                """,
+            )
+            self._create_index_if_columns(
+                conn,
+                table_name="matches",
+                required_columns=["pool_id", "video_id", "created_at"],
+                create_sql="""
+                CREATE INDEX IF NOT EXISTS idx_matches_pool_video
+                ON matches(pool_id, video_id, created_at DESC)
+                """,
+            )
         self._backfill_user_roles()
 
     def _migrate_legacy_json(self) -> None:
@@ -168,10 +235,12 @@ class SQLiteDB:
                                 """
                                 INSERT OR IGNORE INTO matches (
                                     user_id, track_id, camera_id, video_id, source_video_s3,
-                                    timestamp, keyframe, keyframe_s3, score, confidence, distance,
-                                    embeddings_used, distance_mean, distance_std, distance_max,
-                                    second_best_score, score_margin, pool_id, created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                timestamp, keyframe, keyframe_s3, score, confidence, distance,
+                                embeddings_used, distance_mean, distance_std, distance_max,
+                                second_best_score, score_margin, best_similarity, second_best_similarity,
+                                margin, threshold_used, margin_threshold_used, decision_reason,
+                                decision_explanation, pool_id, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 (
                                     match.get("user_id"),
@@ -191,6 +260,13 @@ class SQLiteDB:
                                     float(match.get("distance_max", 0.0)),
                                     match.get("second_best_score"),
                                     match.get("score_margin"),
+                                    match.get("best_similarity", match.get("score")),
+                                    match.get("second_best_similarity", match.get("second_best_score")),
+                                    match.get("margin", match.get("score_margin")),
+                                    match.get("threshold_used"),
+                                    match.get("margin_threshold_used"),
+                                    match.get("decision_reason"),
+                                    match.get("decision_explanation"),
                                     match.get("pool_id"),
                                     match.get("created_at") or datetime.now(timezone.utc).isoformat(),
                                 ),
@@ -521,18 +597,31 @@ class SQLiteDB:
         return embeddings
 
     def _ensure_column(self, conn, table_name: str, column_name: str, column_definition: str) -> None:
-        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        existing_columns = {row["name"] for row in rows}
-        if column_name not in existing_columns:
-            conn.execute(
-                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-            )
+        self.store.ensure_column(conn, table_name, column_name, column_definition)
 
-    def list_matches_for_user(self, user_id: str) -> list[dict[str, Any]]:
-        with self.store.connection() as conn:
-            rows = conn.execute(
-                """
+    def _create_index_if_columns(
+        self,
+        conn,
+        *,
+        table_name: str,
+        required_columns: list[str],
+        create_sql: str,
+    ) -> None:
+        self.store.create_index_if_columns(
+            conn,
+            table_name=table_name,
+            required_columns=required_columns,
+            create_sql=create_sql,
+        )
+
+    def list_matches_for_user(
+        self,
+        user_id: str,
+        pool_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
                 SELECT
+                    id AS match_id,
                     user_id,
                     track_id,
                     camera_id,
@@ -550,14 +639,27 @@ class SQLiteDB:
                     distance_max,
                     second_best_score,
                     score_margin,
+                    best_similarity,
+                    second_best_similarity,
+                    margin,
+                    threshold_used,
+                    margin_threshold_used,
+                    decision_reason,
+                    decision_explanation,
                     pool_id,
                     created_at
                 FROM matches
                 WHERE user_id = ?
+        """
+        params: list[Any] = [user_id]
+        if pool_id is not None:
+            query += " AND pool_id = ?"
+            params.append(pool_id)
+        query += """
                 ORDER BY datetime(created_at) DESC, id DESC
-                """,
-                (user_id,),
-            ).fetchall()
+        """
+        with self.store.connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
     def list_matches_for_video(
@@ -567,10 +669,11 @@ class SQLiteDB:
         pool_id: str | None = None,
     ) -> list[dict[str, Any]]:
         query = """
-            SELECT
-                m.user_id,
-                u.email,
-                u.pool_id,
+                SELECT
+                    m.id AS match_id,
+                    m.user_id,
+                    u.email,
+                    u.pool_id,
                 m.track_id,
                 m.video_id,
                 m.source_video_s3,
@@ -586,6 +689,13 @@ class SQLiteDB:
                 m.distance_max,
                 m.second_best_score,
                 m.score_margin,
+                m.best_similarity,
+                m.second_best_similarity,
+                m.margin,
+                m.threshold_used,
+                m.margin_threshold_used,
+                m.decision_reason,
+                m.decision_explanation,
                 m.pool_id AS match_pool_id,
                 m.created_at
             FROM matches m
@@ -628,6 +738,30 @@ class SQLiteDB:
         with self.store.connection() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [dict(row) for row in rows]
+
+    def get_match_statistics(self, *, pool_id: str | None = None) -> dict[str, float | int]:
+        query = """
+            SELECT
+                COUNT(*) AS total_matches,
+                AVG(COALESCE(best_similarity, score)) AS average_similarity,
+                AVG(margin) AS average_margin
+            FROM matches
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if pool_id is not None:
+            query += " AND pool_id = ?"
+            params.append(pool_id)
+        with self.store.connection() as conn:
+            row = conn.execute(query, tuple(params)).fetchone()
+        total_matches = 0 if row is None or row["total_matches"] is None else int(row["total_matches"])
+        average_similarity = None if row is None else row["average_similarity"]
+        average_margin = None if row is None else row["average_margin"]
+        return {
+            "total_matches": total_matches,
+            "average_similarity": None if average_similarity is None else float(average_similarity),
+            "average_margin": None if average_margin is None else float(average_margin),
+        }
 
     def _pool_from_row(self, row) -> dict[str, Any]:
         return {

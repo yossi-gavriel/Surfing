@@ -15,8 +15,17 @@ from services.frame_processor.src.tracker import IoUTracker
 from services.frame_processor.src.zones import ZoneCalculator
 from shared.utils.logger import get_logger
 from shared.utils.pipeline_store import PipelineStore
+from shared.utils.worker_safety import (
+    GracefulShutdown,
+    WorkerLeaseGuard,
+    WorkerRuntimeStats,
+    get_receive_count,
+    send_to_dlq,
+    worker_instance_id,
+)
 
 logger = get_logger("frame-processor")
+WORKER_TYPE = "frame-processor"
 sqs_client = boto3.client("sqs", region_name=config.aws_region)
 s3_client = boto3.client("s3", region_name=config.aws_region)
 
@@ -32,6 +41,29 @@ try:
 except Exception as exc:
     logger.warning("Pipeline store unavailable (%s). Video status updates disabled.", exc)
     pipeline_store = None
+
+
+def _record_worker_metric(name: str, value: int = 1) -> None:
+    if not pipeline_store:
+        return
+    try:
+        pipeline_store.increment_metric(f"worker.{WORKER_TYPE}.{name}", value)
+    except Exception as exc:
+        logger.warning("Failed to record worker metric %s: %s", name, exc)
+
+
+def _log_worker_stats(stats: WorkerRuntimeStats) -> None:
+    logger.info("Worker metrics snapshot: %s", stats.snapshot())
+
+
+def _frame_job_key(msg_body: dict[str, Any]) -> str:
+    if msg_body.get("idempotency_key"):
+        return str(msg_body["idempotency_key"])
+    video_id = msg_body.get("video_id") or os.path.splitext(
+        msg_body.get("file_name") or os.path.basename(msg_body.get("s3_path", ""))
+    )[0]
+    timestamp = msg_body.get("timestamp") or msg_body.get("chunk_start") or "unknown"
+    return f"frame:{video_id}:{timestamp}"
 
 
 def download_video(s3_path: str, local_path: str) -> None:
@@ -52,6 +84,16 @@ def update_video_status(video_id: str | None, status: str, *, error_message: str
         pipeline_store.update_video_status(video_id, status, error_message=error_message)
     except Exception as exc:
         logger.warning("Failed to update video %s status to %s: %s", video_id, status, exc)
+
+
+def has_video_record(video_id: str | None) -> bool:
+    if not pipeline_store or not video_id:
+        return False
+    try:
+        return pipeline_store.get_video(video_id) is not None
+    except Exception as exc:
+        logger.warning("Failed to lookup video %s: %s", video_id, exc)
+        return False
 
 
 def source_context(msg_body: dict[str, Any]) -> dict[str, Any]:
@@ -81,16 +123,35 @@ def source_context(msg_body: dict[str, Any]) -> dict[str, Any]:
 
 def process_chunk(msg_body: dict[str, Any]) -> None:
     start_time_profile = time.time()
+    started_at = datetime.utcnow().isoformat()
     source = source_context(msg_body)
-    if source["source_type"] == "video":
+    track_video_record = bool(source["video_id"])
+    record_exists = has_video_record(source["video_id"]) if track_video_record else False
+    if track_video_record and not record_exists:
+        logger.warning(
+            "[%s] Video record not found at frame start. Continuing with best-effort diagnostics writes.",
+            source["video_id"],
+        )
+    if track_video_record:
         update_video_status(source["video_id"], "processing")
+        queue_delay_seconds = None
+        try:
+            queued_at = datetime.fromisoformat(source["chunk_start_iso"].replace("Z", "+00:00"))
+            queue_delay_seconds = round(
+                max((datetime.utcnow() - queued_at.replace(tzinfo=None)).total_seconds(), 0.0),
+                3,
+            )
+        except ValueError:
+            queue_delay_seconds = None
         if pipeline_store and source["video_id"]:
-            pipeline_store.set_video_diagnostics(
+            pipeline_store.update_video_diagnostics(
                 source["video_id"],
                 {
                     "frame_processor": {
-                        "started_at": datetime.utcnow().isoformat(),
+                        "started_at": started_at,
                         "source_video": source["s3_path"],
+                        "queued_at": msg_body.get("timestamp"),
+                        "queue_delay_seconds": queue_delay_seconds,
                         "sampled_frames": 0,
                         "detections": 0,
                         "tracks_seen": 0,
@@ -196,7 +257,7 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
             tracks_history[tid]["confidences"].append(conf)
             tracks_history[tid]["end_time"] = current_time_iso
 
-            if source["source_type"] == "video":
+            if track_video_record:
                 bx1, by1, bx2, by2 = [int(value) for value in bbox]
                 bx1, by1 = max(0, bx1), max(0, by1)
                 bx2, by2 = min(frame.shape[1], bx2), min(frame.shape[0], by2)
@@ -282,6 +343,9 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
                 os.remove(keyframe_local)
 
         del data["confidences"]
+        data["idempotency_key"] = (
+            f"embedding:{data.get('video_id') or data.get('source_video_id')}:{data['track_id']}:{data['start_time']}"
+        )
         sqs_client.send_message(
             QueueUrl=config.output_sqs_url,
             MessageBody=json.dumps(data),
@@ -296,7 +360,7 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
         total_detections,
         valid_tracks_count,
     )
-    if source["source_type"] == "video":
+    if track_video_record:
         if pipeline_store and source["video_id"]:
             pipeline_store.update_video_diagnostics(
                 source["video_id"],
@@ -312,46 +376,159 @@ def process_chunk(msg_body: dict[str, Any]) -> None:
                     }
                 },
             )
-        update_video_status(source["video_id"], "completed")
+        if valid_tracks_count == 0:
+            update_video_status(source["video_id"], "completed")
 
 
 def main() -> None:
     logger.info("Starting Frame Processor Service")
+    if not pipeline_store:
+        logger.error("Pipeline store is unavailable; frame worker will not consume messages")
+        return
 
-    while True:
+    shutdown = GracefulShutdown(logger=logger, worker_name=WORKER_TYPE)
+    leader_id = worker_instance_id(WORKER_TYPE)
+    stats = WorkerRuntimeStats(WORKER_TYPE)
+    lease_guard = WorkerLeaseGuard(
+        pipeline_store=pipeline_store,
+        worker_type=WORKER_TYPE,
+        leader_id=leader_id,
+        ttl_seconds=config.worker_lease_ttl_seconds,
+        metadata={"queue_url": config.input_sqs_url},
+        logger=logger,
+    )
+
+    while not shutdown.should_stop():
         try:
+            if lease_guard.lease_lost():
+                logger.warning("Frame worker lease lost; waiting before retrying leadership")
+                shutdown.wait(2)
+                continue
+
+            if not lease_guard.ensure_acquired():
+                shutdown.wait(2)
+                continue
+
             response = sqs_client.receive_message(
                 QueueUrl=config.input_sqs_url,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=20,
+                AttributeNames=["All"],
             )
 
             messages = response.get("Messages", [])
             for message in messages:
+                if shutdown.should_stop():
+                    break
+
                 receipt_handle = message["ReceiptHandle"]
-                body = json.loads(message["Body"])
+                receive_count = get_receive_count(message)
 
                 try:
-                    process_chunk(body)
+                    body = json.loads(message["Body"])
+                except json.JSONDecodeError as exc:
+                    logger.error("Invalid frame message JSON: %s", exc)
+                    stats.record_failure()
+                    _record_worker_metric("failures")
+                    send_to_dlq(
+                        sqs_client=sqs_client,
+                        dlq_url=None if not hasattr(config, "dlq_sqs_url") else config.dlq_sqs_url,
+                        worker_type=WORKER_TYPE,
+                        message=message,
+                        payload=None,
+                        reason="invalid_json",
+                        error_message=str(exc),
+                    )
                     sqs_client.delete_message(
                         QueueUrl=config.input_sqs_url,
                         ReceiptHandle=receipt_handle,
                     )
+                    continue
+
+                job_key = _frame_job_key(body)
+                if not pipeline_store.try_start_job(
+                    job_type="frame_process",
+                    job_key=job_key,
+                    job_id=message.get("MessageId"),
+                    payload=body,
+                ):
+                    logger.info("Skipping duplicate frame job job_key=%s", job_key)
+                    sqs_client.delete_message(
+                        QueueUrl=config.input_sqs_url,
+                        ReceiptHandle=receipt_handle,
+                    )
+                    _record_worker_metric("duplicates")
+                    continue
+
+                try:
+                    process_chunk(body)
+                    pipeline_store.finish_job(job_key=job_key, status="completed")
+                    sqs_client.delete_message(
+                        QueueUrl=config.input_sqs_url,
+                        ReceiptHandle=receipt_handle,
+                    )
+                    stats.record_processed()
+                    _record_worker_metric("messages_processed")
+                    if stats.processed % config.metrics_log_interval == 0:
+                        _log_worker_stats(stats)
                 except Exception as exc:
-                    if is_uploaded_video_message(body):
+                    pipeline_store.finish_job(
+                        job_key=job_key,
+                        status="failed",
+                        error_message=str(exc),
+                    )
+                    video_id = body.get("video_id") or os.path.splitext(
+                        body.get("file_name") or os.path.basename(body.get("s3_path", ""))
+                    )[0]
+                    if has_video_record(video_id):
                         update_video_status(
-                            body.get("video_id"),
+                            video_id,
                             "failed",
                             error_message=str(exc),
                         )
                     logger.error("Error processing message: %s", exc, exc_info=True)
+                    stats.record_failure()
+                    _record_worker_metric("failures")
+                    if receive_count >= config.max_receive_count:
+                        sent_to_dlq = send_to_dlq(
+                            sqs_client=sqs_client,
+                            dlq_url=config.dlq_sqs_url,
+                            worker_type=WORKER_TYPE,
+                            message=message,
+                            payload=body,
+                            reason="max_receive_count_exceeded",
+                            error_message=str(exc),
+                        )
+                        if sent_to_dlq:
+                            stats.record_dead_letter()
+                            _record_worker_metric("dead_lettered")
+                        logger.error(
+                            "Dead-lettering frame job job_key=%s receive_count=%s sent_to_dlq=%s",
+                            job_key,
+                            receive_count,
+                            sent_to_dlq,
+                        )
+                        sqs_client.delete_message(
+                            QueueUrl=config.input_sqs_url,
+                            ReceiptHandle=receipt_handle,
+                        )
+                    else:
+                        stats.record_retry()
+                        _record_worker_metric("retries")
+                        logger.warning(
+                            "Frame job will be retried job_key=%s receive_count=%s",
+                            job_key,
+                            receive_count,
+                        )
 
-        except KeyboardInterrupt:
-            logger.info("Shutting down gracefully...")
-            break
         except Exception as exc:
             logger.error("SQS Receive error: %s", exc, exc_info=True)
-            time.sleep(5)
+            shutdown.wait(5)
+    try:
+        lease_guard.release()
+    except Exception as exc:
+        logger.warning("Failed to release worker lease: %s", exc)
+    _log_worker_stats(stats)
 
 
 if __name__ == "__main__":

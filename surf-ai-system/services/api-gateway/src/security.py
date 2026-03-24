@@ -78,7 +78,13 @@ def verify_password(password: str, password_salt: str, password_hash: str) -> bo
 
 
 def create_access_token(user: dict[str, Any]) -> str:
-    config = get_jwt_config()
+    try:
+        config = get_jwt_config()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is temporarily unavailable",
+        ) from exc
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(hours=config.expire_hours)
     payload = {
@@ -96,7 +102,13 @@ def create_access_token(user: dict[str, Any]) -> str:
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
-    config = get_jwt_config()
+    try:
+        config = get_jwt_config()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is temporarily unavailable",
+        ) from exc
     try:
         payload = jwt.decode(
             token,
@@ -155,7 +167,13 @@ def get_current_user(
 ) -> dict[str, Any]:
     token = _extract_bearer_token(authorization)
     payload = decode_access_token(token)
-    user = request.app.state.db.get_user_by_id(payload["sub"])
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API database is unavailable",
+        )
+    user = db.get_user_by_id(payload["sub"])
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

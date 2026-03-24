@@ -5,6 +5,7 @@ import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 
 import { AuthResponse, AuthService } from '../../core/auth.service';
+import { I18nService } from '../../core/i18n.service';
 
 @Component({
   selector: 'app-login-page',
@@ -13,34 +14,54 @@ import { AuthResponse, AuthService } from '../../core/auth.service';
   template: `
     <section class="hero-card">
       <div class="hero-copy">
-        <p class="eyebrow">Surf AI</p>
-        <h1>Find every wave you appeared in.</h1>
-        <p class="subtitle">
-          Sign in, upload a clear face photo, and we will surface the matched clips from the
-          production pipeline.
-        </p>
+        <p class="eyebrow">{{ i18n.t('login.eyebrow') }}</p>
+        <h1>{{ i18n.t('login.title') }}</h1>
+        <p class="subtitle">{{ i18n.t('login.subtitle') }}</p>
       </div>
 
       <form class="auth-card" (ngSubmit)="submit()">
-        <p class="mode">{{ isSignup() ? 'Create account' : 'Welcome back' }}</p>
+        <p class="mode">
+          {{ isSignup() ? i18n.t('login.createAccount') : i18n.t('login.welcomeBack') }}
+        </p>
+
         <label>
-          <span>Email</span>
-          <input [(ngModel)]="email" name="email" type="email" placeholder="you@example.com" required />
+          <span>{{ i18n.t('login.email') }}</span>
+          <input
+            [(ngModel)]="email"
+            name="email"
+            type="email"
+            [placeholder]="i18n.t('login.emailPlaceholder')"
+            required
+          />
         </label>
 
         <label>
-          <span>Password</span>
-          <input [(ngModel)]="password" name="password" type="password" placeholder="At least 6 characters" required />
+          <span>{{ i18n.t('login.password') }}</span>
+          <input
+            [(ngModel)]="password"
+            name="password"
+            type="password"
+            [placeholder]="i18n.t('login.passwordPlaceholder')"
+            required
+          />
         </label>
 
         <button type="submit" [disabled]="submitting()">
-          {{ submitting() ? 'Working...' : (isSignup() ? 'Sign up' : 'Log in') }}
+          {{
+            submitting()
+              ? i18n.t('common.working')
+              : (isSignup() ? i18n.t('login.signUp') : i18n.t('login.logIn'))
+          }}
         </button>
 
         <p class="error" *ngIf="errorMessage()">{{ errorMessage() }}</p>
 
         <button type="button" class="link-button" (click)="toggleMode()">
-          {{ isSignup() ? 'Already have an account? Log in' : 'Need an account? Sign up' }}
+          {{
+            isSignup()
+              ? i18n.t('login.alreadyHaveAccount')
+              : i18n.t('login.needAccount')
+          }}
         </button>
       </form>
     </section>
@@ -173,6 +194,7 @@ export class LoginComponent {
   private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
   private readonly auth = inject(AuthService);
+  protected readonly i18n = inject(I18nService);
 
   email = '';
   password = '';
@@ -203,7 +225,7 @@ export class LoginComponent {
         },
         error: (error) => {
           this.submitting.set(false);
-          this.errorMessage.set(error.error?.detail || 'Unable to authenticate right now.');
+          this.errorMessage.set(this.i18n.translateApiMessage(error.error?.detail, 'login.authFailed'));
         },
       });
   }

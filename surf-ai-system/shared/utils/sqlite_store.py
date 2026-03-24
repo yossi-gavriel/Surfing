@@ -36,6 +36,39 @@ class SQLiteStore:
             row = conn.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
             return row is not None
 
+    def table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row["name"] for row in rows}
+
+    def ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_definition: str,
+    ) -> bool:
+        existing_columns = self.table_columns(conn, table_name)
+        if column_name in existing_columns:
+            return False
+        conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+        return True
+
+    def create_index_if_columns(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        required_columns: list[str],
+        create_sql: str,
+    ) -> bool:
+        existing_columns = self.table_columns(conn, table_name)
+        if not set(required_columns).issubset(existing_columns):
+            return False
+        conn.execute(create_sql)
+        return True
+
 
 def load_json_records(path: str, root_key: str) -> list[dict]:
     if not os.path.exists(path):

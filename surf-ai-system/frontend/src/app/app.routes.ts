@@ -9,9 +9,9 @@ import { UploadFaceComponent } from './pages/upload-face/upload-face.component';
 export const routes: Routes = [
   { path: '', redirectTo: 'my-videos', pathMatch: 'full' },
   { path: 'login', component: LoginComponent },
-  { path: 'admin', component: AdminComponent, canActivate: [authGuard] },
-  { path: 'admin/videos/:videoId', component: AdminVideoDebugComponent, canActivate: [authGuard] },
-  { path: 'upload-face', component: UploadFaceComponent, canActivate: [authGuard] },
-  { path: 'my-videos', component: MyVideosComponent, canActivate: [authGuard] },
+  { path: 'admin', component: AdminComponent, canActivate: [authGuard], data: { roles: ['admin'] } },
+  { path: 'admin/videos/:videoId', component: AdminVideoDebugComponent, canActivate: [authGuard], data: { roles: ['admin'] } },
+  { path: 'upload-face', component: UploadFaceComponent, canActivate: [authGuard], data: { roles: ['user', 'admin'] } },
+  { path: 'my-videos', component: MyVideosComponent, canActivate: [authGuard], data: { roles: ['user', 'admin'] } },
   { path: '**', redirectTo: 'my-videos' },
 ];

@@ -10,14 +10,28 @@ import boto3
 from shared.utils.logger import get_logger
 from shared.utils.pipeline_store import PipelineStore
 from shared.utils.s3_client import S3Client
+from shared.utils.worker_safety import (
+    GracefulShutdown,
+    WorkerLeaseGuard,
+    WorkerRuntimeStats,
+    worker_instance_id,
+)
 from src.config import config
 from src.ffmpeg_runner import FFmpegRunner
 
 logger = get_logger("ingestion-service")
+WORKER_TYPE = "ingestion-service"
 
 sqs_client = boto3.client("sqs", region_name=config.aws_region)
 s3_client = S3Client(region_name=config.aws_region)
 pipeline_store = PipelineStore(config.sqlite_db_path)
+
+
+def _record_worker_metric(name: str, value: int = 1) -> None:
+    try:
+        pipeline_store.increment_metric(f"worker.{WORKER_TYPE}.{name}", value)
+    except Exception as exc:
+        logger.warning("Failed to record ingestion metric %s: %s", name, exc)
 
 
 def parse_chunk_times(filename: str, duration: int) -> tuple[str, str]:
@@ -57,7 +71,12 @@ def send_sqs_with_retry(msg_body: dict[str, Any], max_retries: int = 3) -> bool:
     return False
 
 
-def upload_and_notify(camera_config: dict[str, Any], file_path: str) -> bool:
+def upload_and_notify(
+    camera_config: dict[str, Any],
+    file_path: str,
+    *,
+    stats: WorkerRuntimeStats | None = None,
+) -> bool:
     camera_id = camera_config["camera_id"]
     filename = os.path.basename(file_path)
     logger.info("[%s] Processing stabilized segment %s", camera_id, filename)
@@ -77,6 +96,9 @@ def upload_and_notify(camera_config: dict[str, Any], file_path: str) -> bool:
 
     if not s3_client.upload_file(file_path, config.s3_bucket, s3_key):
         logger.error("[%s] Upload failed for %s", camera_id, filename)
+        if stats is not None:
+            stats.record_failure()
+            _record_worker_metric("failures")
         return False
 
     message = {
@@ -84,6 +106,7 @@ def upload_and_notify(camera_config: dict[str, Any], file_path: str) -> bool:
         "camera_id": camera_id,
         "pool_id": camera_config.get("pool_id"),
         "video_id": os.path.splitext(filename)[0],
+        "idempotency_key": f"frame:{os.path.splitext(filename)[0]}:{start_iso}",
         "s3_path": s3_path,
         "timestamp": datetime.utcnow().isoformat(),
         "file_name": filename,
@@ -93,9 +116,44 @@ def upload_and_notify(camera_config: dict[str, Any], file_path: str) -> bool:
 
     if not send_sqs_with_retry(message):
         logger.error("[%s] Queue publish failed for %s", camera_id, filename)
+        if stats is not None:
+            stats.record_failure()
+            _record_worker_metric("failures")
         return False
 
+    video_id = message["video_id"]
+    try:
+        existing_video = pipeline_store.get_video(video_id)
+        if existing_video is None:
+            pipeline_store.create_video(
+                video_id=video_id,
+                s3_path=s3_path,
+                status="uploaded",
+                source_type="camera",
+                camera_id=camera_id,
+                pool_id=camera_config.get("pool_id"),
+            )
+        else:
+            pipeline_store.update_video_status(video_id, "uploaded")
+            pipeline_store.update_video_diagnostics(
+                video_id,
+                {
+                    "ingestion_service": {
+                        "camera_id": camera_id,
+                        "source_type": "camera",
+                        "last_segment_s3": s3_path,
+                        "last_segment_file_name": filename,
+                        "queued_at": message["timestamp"],
+                    }
+                },
+            )
+    except Exception as exc:
+        logger.warning("[%s] Failed to persist camera segment video record %s: %s", camera_id, video_id, exc)
+
     logger.info("[%s] Uploaded and queued %s", camera_id, filename)
+    if stats is not None:
+        stats.record_processed()
+    _record_worker_metric("messages_processed")
     try:
         os.remove(file_path)
     except OSError as exc:
@@ -103,7 +161,13 @@ def upload_and_notify(camera_config: dict[str, Any], file_path: str) -> bool:
     return True
 
 
-def poll_directory(camera_config: dict[str, Any], directory: str, stop_event: threading.Event) -> None:
+def poll_directory(
+    camera_config: dict[str, Any],
+    directory: str,
+    stop_event: threading.Event,
+    *,
+    stats: WorkerRuntimeStats | None = None,
+) -> None:
     camera_id = camera_config["camera_id"]
     processed_files: set[str] = set()
     file_sizes: dict[str, int] = {}
@@ -136,7 +200,7 @@ def poll_directory(camera_config: dict[str, Any], directory: str, stop_event: th
                     if path in processed_files:
                         continue
                     processed_files.add(path)
-                    if not upload_and_notify(camera_config, path):
+                    if not upload_and_notify(camera_config, path, stats=stats):
                         processed_files.discard(path)
 
                 for path in list(processed_files):
@@ -163,7 +227,13 @@ def camera_signature(camera_config: dict[str, Any]) -> str:
     )
 
 
-def run_camera(camera_config: dict[str, Any], stop_event: threading.Event, runner: FFmpegRunner) -> None:
+def run_camera(
+    camera_config: dict[str, Any],
+    stop_event: threading.Event,
+    runner: FFmpegRunner,
+    *,
+    stats: WorkerRuntimeStats | None = None,
+) -> None:
     camera_id = camera_config["camera_id"]
     output_dir = runner.output_dir
     os.makedirs(output_dir, exist_ok=True)
@@ -171,6 +241,7 @@ def run_camera(camera_config: dict[str, Any], stop_event: threading.Event, runne
     poller_thread = threading.Thread(
         target=poll_directory,
         args=(camera_config, output_dir, stop_event),
+        kwargs={"stats": stats},
         daemon=True,
     )
     poller_thread.start()
@@ -185,7 +256,11 @@ def run_camera(camera_config: dict[str, Any], stop_event: threading.Event, runne
         poller_thread.join(timeout=5)
 
 
-def start_camera_worker(camera_config: dict[str, Any]) -> dict[str, Any] | None:
+def start_camera_worker(
+    camera_config: dict[str, Any],
+    *,
+    stats: WorkerRuntimeStats | None = None,
+) -> dict[str, Any] | None:
     camera_id = camera_config.get("camera_id")
     stream_url = camera_config.get("url") or camera_config.get("rtsp_url")
     if not camera_id or not stream_url:
@@ -203,6 +278,7 @@ def start_camera_worker(camera_config: dict[str, Any]) -> dict[str, Any] | None:
     thread = threading.Thread(
         target=run_camera,
         args=(camera_config, stop_event, runner),
+        kwargs={"stats": stats},
         daemon=True,
     )
     thread.start()
@@ -246,9 +322,30 @@ def load_camera_configs() -> list[dict[str, Any]]:
 def main() -> None:
     logger.info("Starting Ingestion Service")
     workers: dict[str, dict[str, Any]] = {}
+    shutdown = GracefulShutdown(logger=logger, worker_name=WORKER_TYPE)
+    leader_id = worker_instance_id(WORKER_TYPE)
+    stats = WorkerRuntimeStats(WORKER_TYPE)
+    last_logged_processed = 0
+    lease_guard = WorkerLeaseGuard(
+        pipeline_store=pipeline_store,
+        worker_type=WORKER_TYPE,
+        leader_id=leader_id,
+        ttl_seconds=config.worker_lease_ttl_seconds,
+        metadata={"camera_poll_interval": config.camera_poll_interval},
+        logger=logger,
+    )
 
     try:
-        while True:
+        while not shutdown.should_stop():
+            if lease_guard.lease_lost():
+                logger.warning("Ingestion worker lease lost; waiting before retrying leadership")
+                shutdown.wait(config.camera_poll_interval)
+                continue
+
+            if not lease_guard.ensure_acquired():
+                shutdown.wait(config.camera_poll_interval)
+                continue
+
             cameras = load_camera_configs()
             desired = {camera["camera_id"]: camera for camera in cameras}
 
@@ -264,19 +361,30 @@ def main() -> None:
                 if worker:
                     stop_camera_worker(camera_id, workers.pop(camera_id))
 
-                new_worker = start_camera_worker(camera_config)
+                new_worker = start_camera_worker(camera_config, stats=stats)
                 if new_worker:
                     workers[camera_id] = new_worker
 
             if not desired:
                 logger.info("No active cameras configured. Waiting for camera registrations...")
 
-            time.sleep(config.camera_poll_interval)
-    except KeyboardInterrupt:
-        logger.info("Received interrupt, shutting down ingestion workers")
+            if (
+                stats.processed
+                and stats.processed != last_logged_processed
+                and stats.processed % config.metrics_log_interval == 0
+            ):
+                logger.info("Ingestion worker metrics snapshot: %s", stats.snapshot())
+                last_logged_processed = stats.processed
+
+            shutdown.wait(config.camera_poll_interval)
     finally:
         for camera_id, worker in list(workers.items()):
             stop_camera_worker(camera_id, worker)
+        try:
+            lease_guard.release()
+        except Exception as exc:
+            logger.warning("Failed to release ingestion lease: %s", exc)
+        logger.info("Ingestion worker metrics snapshot: %s", stats.snapshot())
         logger.info("Ingestion shutdown complete")
 
 

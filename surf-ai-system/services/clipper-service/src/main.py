@@ -10,10 +10,31 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../.
 from src.config import config
 from src.clipper import VideoClipper
 from shared.utils.logger import get_logger
+from shared.utils.pipeline_store import PipelineStore
+from shared.utils.worker_safety import (
+    GracefulShutdown,
+    WorkerLeaseGuard,
+    WorkerRuntimeStats,
+    get_receive_count,
+    send_to_dlq,
+    worker_instance_id,
+)
 
 logger = get_logger("clipper-service")
+WORKER_TYPE = "clipper-service"
 sqs_client = boto3.client('sqs', region_name=config.aws_region)
 s3_client = boto3.client('s3', region_name=config.aws_region)
+pipeline_store = PipelineStore(os.environ.get("SQLITE_DB_PATH", "/app/data/surf_ai.db"))
+
+
+def _record_worker_metric(name: str, value: int = 1) -> None:
+    pipeline_store.increment_metric(f"worker.{WORKER_TYPE}.{name}", value)
+
+
+def _clipper_job_key(msg_body: dict) -> str:
+    if msg_body.get("idempotency_key"):
+        return str(msg_body["idempotency_key"])
+    return f"clipper:{msg_body.get('track_id')}:{msg_body.get('start_time') or msg_body.get('timestamp') or 'root'}"
 
 def download_video(s3_key: str, local_path: str) -> bool:
     try:
@@ -91,7 +112,7 @@ def process_clip(msg_body: dict, clipper: VideoClipper):
         end_dt = datetime.fromisoformat(str(end_time_iso).replace('Z', '+00:00'))
     except Exception as e:
         logger.error(f"[{track_id}] Timestamp validation structure rigorously failed ISO specifications exactly: {e}")
-        return
+        raise ValueError(f"invalid clip timestamps for track_id={track_id}") from e
 
     local_input = f"/tmp/{camera_id or 'video'}_{track_id}_input.ts"
     local_output = f"/tmp/{camera_id}_{track_id}_clip.mp4"
@@ -152,35 +173,128 @@ def process_clip(msg_body: dict, clipper: VideoClipper):
 def main():
     logger.info("Initializing Topologically Driven Clipper Architecture Daemon Structurally")
     clipper = VideoClipper()
+    shutdown = GracefulShutdown(logger=logger, worker_name=WORKER_TYPE)
+    leader_id = worker_instance_id(WORKER_TYPE)
+    stats = WorkerRuntimeStats(WORKER_TYPE)
+    lease_guard = WorkerLeaseGuard(
+        pipeline_store=pipeline_store,
+        worker_type=WORKER_TYPE,
+        leader_id=leader_id,
+        ttl_seconds=config.worker_lease_ttl_seconds,
+        metadata={"queue_url": config.input_sqs_url},
+        logger=logger,
+    )
     
-    while True:
+    while not shutdown.should_stop():
         try:
+            if lease_guard.lease_lost():
+                logger.warning("Clipper worker lease lost; waiting before retrying leadership")
+                shutdown.wait(2)
+                continue
+
+            if not lease_guard.ensure_acquired():
+                shutdown.wait(2)
+                continue
+
             response = sqs_client.receive_message(
                 QueueUrl=config.input_sqs_url,
                 MaxNumberOfMessages=1,
-                WaitTimeSeconds=20
+                WaitTimeSeconds=20,
+                AttributeNames=["All"],
             )
             
             messages = response.get('Messages', [])
             for message in messages:
+                if shutdown.should_stop():
+                    break
                 receipt_handle = message['ReceiptHandle']
-                body = json.loads(message['Body'])
+                receive_count = get_receive_count(message)
                 
                 try:
-                    process_clip(body, clipper)
+                    body = json.loads(message['Body'])
+                except json.JSONDecodeError as exc:
+                    logger.error("Invalid clipper message JSON: %s", exc)
+                    stats.record_failure()
+                    _record_worker_metric("failures")
+                    send_to_dlq(
+                        sqs_client=sqs_client,
+                        dlq_url=config.dlq_sqs_url,
+                        worker_type=WORKER_TYPE,
+                        message=message,
+                        payload=None,
+                        reason="invalid_json",
+                        error_message=str(exc),
+                    )
                     sqs_client.delete_message(
                         QueueUrl=config.input_sqs_url,
                         ReceiptHandle=receipt_handle
                     )
+                    continue
+
+                job_key = _clipper_job_key(body)
+                if not pipeline_store.try_start_job(
+                    job_type="clipper_job",
+                    job_key=job_key,
+                    job_id=message.get("MessageId"),
+                    payload=body,
+                ):
+                    logger.info("Skipping duplicate clipper job job_key=%s", job_key)
+                    sqs_client.delete_message(
+                        QueueUrl=config.input_sqs_url,
+                        ReceiptHandle=receipt_handle
+                    )
+                    _record_worker_metric("duplicates")
+                    continue
+
+                try:
+                    process_clip(body, clipper)
+                    pipeline_store.finish_job(job_key=job_key, status="completed")
+                    sqs_client.delete_message(
+                        QueueUrl=config.input_sqs_url,
+                        ReceiptHandle=receipt_handle
+                    )
+                    stats.record_processed()
+                    _record_worker_metric("messages_processed")
+                    if stats.processed % config.metrics_log_interval == 0:
+                        logger.info("Clipper worker metrics snapshot: %s", stats.snapshot())
                 except Exception as e:
+                    pipeline_store.finish_job(
+                        job_key=job_key,
+                        status="failed",
+                        error_message=str(e),
+                    )
                     logger.error(f"Topological queue operations fundamentally aborted maintaining context dynamically for safe retries logically: {e}")
+                    stats.record_failure()
+                    _record_worker_metric("failures")
+                    if receive_count >= config.max_receive_count:
+                        sent_to_dlq = send_to_dlq(
+                            sqs_client=sqs_client,
+                            dlq_url=config.dlq_sqs_url,
+                            worker_type=WORKER_TYPE,
+                            message=message,
+                            payload=body,
+                            reason="max_receive_count_exceeded",
+                            error_message=str(e),
+                        )
+                        if sent_to_dlq:
+                            stats.record_dead_letter()
+                            _record_worker_metric("dead_lettered")
+                        sqs_client.delete_message(
+                            QueueUrl=config.input_sqs_url,
+                            ReceiptHandle=receipt_handle
+                        )
+                    else:
+                        stats.record_retry()
+                        _record_worker_metric("retries")
                     
-        except KeyboardInterrupt:
-            logger.info("Safely terminating extraction bindings inherently sequentially.")
-            break
         except Exception as e:
             logger.error(f"Network array polling rigorously errored mapping seamlessly: {e}")
-            time.sleep(5)
+            shutdown.wait(5)
+    try:
+        lease_guard.release()
+    except Exception as exc:
+        logger.warning("Failed to release clipper lease: %s", exc)
+    logger.info("Clipper worker metrics snapshot: %s", stats.snapshot())
 
 if __name__ == "__main__":
     main()
