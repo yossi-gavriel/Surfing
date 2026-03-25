@@ -710,7 +710,7 @@ export class AdminVideoDebugComponent {
   }
 
   goBack(): void {
-    this.router.navigate(['/admin']);
+    this.router.navigate(['/admin/results']);
   }
 
   boolLabel(value: boolean | undefined): string {
