@@ -30,6 +30,7 @@ class MatchDecision:
 class CandidateScore:
     user_id: str
     best_user_embedding_id: str | None
+    embeddings_compared: int
     aggregated_distance: float
     best_similarity: float
     mean_distance: float
@@ -265,6 +266,7 @@ def evaluate_track_match(
             CandidateScore(
                 user_id=str(user["user_id"]),
                 best_user_embedding_id=None if best_user_embedding_id is None else str(best_user_embedding_id),
+                embeddings_compared=int(user_embeddings.shape[0]),
                 aggregated_distance=best_distance,
                 best_similarity=best_similarity,
                 mean_distance=mean_distance,

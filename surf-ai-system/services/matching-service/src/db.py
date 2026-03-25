@@ -252,6 +252,8 @@ class MatchesDB:
                 CREATE TABLE IF NOT EXISTS matches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
+                    user_embedding_id TEXT,
+                    video_embedding_id TEXT,
                     track_id TEXT NOT NULL,
                     camera_id TEXT,
                     video_id TEXT,
@@ -275,12 +277,15 @@ class MatchesDB:
                     margin_threshold_used REAL,
                     decision_reason TEXT,
                     decision_explanation TEXT,
+                    top_candidates_json TEXT,
                     pool_id TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(user_id, track_id)
                 )
                 """
             )
+            self.store.ensure_column(conn, "matches", "user_embedding_id", "TEXT")
+            self.store.ensure_column(conn, "matches", "video_embedding_id", "TEXT")
             self.store.ensure_column(conn, "matches", "camera_id", "TEXT")
             self.store.ensure_column(conn, "matches", "video_id", "TEXT")
             self.store.ensure_column(conn, "matches", "source_video_s3", "TEXT")
@@ -297,6 +302,7 @@ class MatchesDB:
             self.store.ensure_column(conn, "matches", "margin_threshold_used", "REAL")
             self.store.ensure_column(conn, "matches", "decision_reason", "TEXT")
             self.store.ensure_column(conn, "matches", "decision_explanation", "TEXT")
+            self.store.ensure_column(conn, "matches", "top_candidates_json", "TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_matches_user_created
@@ -471,13 +477,13 @@ class MatchesDB:
         conn.execute(
             """
             INSERT INTO matches (
-                user_id, track_id, camera_id, video_id, source_video_s3,
+                user_id, user_embedding_id, video_embedding_id, track_id, camera_id, video_id, source_video_s3,
                 timestamp, keyframe, keyframe_s3, score, confidence, distance,
                 embeddings_used, distance_mean, distance_std, distance_max,
                 second_best_score, score_margin, best_similarity, second_best_similarity,
                 margin, threshold_used, margin_threshold_used, decision_reason,
-                decision_explanation, pool_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                decision_explanation, top_candidates_json, pool_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             self._match_row_values(match),
         )
@@ -487,12 +493,12 @@ class MatchesDB:
         conn.execute(
             """
             UPDATE matches
-            SET user_id = ?, track_id = ?, camera_id = ?, video_id = ?, source_video_s3 = ?,
+            SET user_id = ?, user_embedding_id = ?, video_embedding_id = ?, track_id = ?, camera_id = ?, video_id = ?, source_video_s3 = ?,
                 timestamp = ?, keyframe = ?, keyframe_s3 = ?, score = ?, confidence = ?, distance = ?,
                 embeddings_used = ?, distance_mean = ?, distance_std = ?, distance_max = ?,
                 second_best_score = ?, score_margin = ?, best_similarity = ?, second_best_similarity = ?,
                 margin = ?, threshold_used = ?, margin_threshold_used = ?, decision_reason = ?,
-                decision_explanation = ?, pool_id = ?, created_at = ?
+                decision_explanation = ?, top_candidates_json = ?, pool_id = ?, created_at = ?
             WHERE id = ?
             """,
             (*values, row_id),
@@ -501,6 +507,8 @@ class MatchesDB:
     def _match_row_values(self, match: dict[str, Any]) -> tuple[Any, ...]:
         return (
             match["user_id"],
+            match.get("user_embedding_id"),
+            match.get("video_embedding_id"),
             match["track_id"],
             match.get("camera_id"),
             match.get("video_id"),
@@ -524,6 +532,9 @@ class MatchesDB:
             match.get("margin_threshold_used"),
             match.get("decision_reason"),
             match.get("decision_explanation"),
+            None
+            if match.get("top_candidates") is None
+            else json.dumps(match.get("top_candidates")),
             match.get("pool_id"),
             match.get("created_at") or datetime.now(timezone.utc).isoformat(),
         )

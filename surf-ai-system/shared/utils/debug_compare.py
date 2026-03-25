@@ -5,8 +5,34 @@ from typing import Any
 from shared.utils.embeddings import pairwise_cosine_similarity, pairwise_euclidean_distances
 from shared.utils.match_decision import (
     build_candidate_users_from_reference_images,
+    CandidateScore,
     evaluate_track_match,
 )
+
+
+def _serialize_top_candidates(
+    ranked_candidates: list[CandidateScore],
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    if not ranked_candidates:
+        return []
+
+    best_similarity = float(ranked_candidates[0].best_similarity)
+    return [
+        {
+            "rank": index,
+            "user_id": candidate.user_id,
+            "user_embedding_id": candidate.best_user_embedding_id,
+            "score": float(candidate.best_similarity),
+            "similarity": float(candidate.best_similarity),
+            "distance": float(candidate.aggregated_distance),
+            "final_score": float(candidate.final_score),
+            "margin": float(best_similarity - candidate.best_similarity),
+            "embeddings_used": int(candidate.embeddings_compared),
+        }
+        for index, candidate in enumerate(ranked_candidates[: max(int(limit), 1)], start=1)
+    ]
 
 
 def build_debug_compare_response(
@@ -108,6 +134,7 @@ def build_debug_compare_response(
                 if frame.get("used_for_embedding")
             )
             current_attempt = matching_attempts.get(video_embedding["track_id"]) or {}
+            current_top_candidates = _serialize_top_candidates(evaluation.ranked_candidates)
             best_reference_by_track[video_embedding["track_id"]] = {
                 "video_embedding_id": video_embedding["video_embedding_id"],
                 "track_id": video_embedding["track_id"],
@@ -155,6 +182,8 @@ def build_debug_compare_response(
                 "current_second_best_user_id": None
                 if second_best_candidate is None
                 else second_best_candidate.user_id,
+                "current_top_candidates": current_top_candidates,
+                "last_attempt_top_candidates": current_attempt.get("top_candidates") or [],
             }
         comparisons.sort(key=lambda item: (item["similarity"], -item["distance"]), reverse=True)
 
@@ -200,6 +229,8 @@ def build_debug_compare_response(
             "current_pairwise_second_best_similarity": best_reference_by_track.get(item["track_id"], {}).get("current_pairwise_second_best_similarity"),
             "current_evaluation_candidates": best_reference_by_track.get(item["track_id"], {}).get("current_evaluation_candidates"),
             "current_second_best_user_id": best_reference_by_track.get(item["track_id"], {}).get("current_second_best_user_id"),
+            "current_top_candidates": best_reference_by_track.get(item["track_id"], {}).get("current_top_candidates", []),
+            "last_attempt_top_candidates": best_reference_by_track.get(item["track_id"], {}).get("last_attempt_top_candidates", []),
         }
         for item in video_embeddings
     ]

@@ -396,27 +396,11 @@ class MatchingConsumer:
         pool_id = payload.get("pool_id")
         target_user_id = payload.get("user_id")
         users = self.matcher.users_db.get_all_users(pool_id=pool_id)
-        override_embedding = payload.get("user_embedding")
-        if override_embedding is None:
-            return users
-
-        normalized = normalize_embeddings(override_embedding)
-        if normalized.size == 0:
-            raise PermanentMessageError("backfill user embedding could not be normalized")
-
-        updated_users = []
-        for user in users:
-            if user["user_id"] != target_user_id:
-                updated_users.append(user)
-                continue
-
-            updated_user = dict(user)
-            updated_user["embeddings"] = normalized
-            updated_user["embedding_ids"] = [
-                str(payload.get("user_embedding_id") or "uploaded")
-            ] * len(normalized)
-            updated_users.append(updated_user)
-        return updated_users
+        if payload.get("user_embedding") is not None:
+            normalized = normalize_embeddings(payload.get("user_embedding"))
+            if normalized.size == 0:
+                raise PermanentMessageError("backfill user embedding could not be normalized")
+        return users
 
     def _batch_size(self, payload: dict[str, Any]) -> int:
         raw_value = payload.get("batch_size")
@@ -562,6 +546,8 @@ class MatchingConsumer:
         return self.matches_db.add_match(
             {
                 "user_id": match_result.user_id,
+                "user_embedding_id": match_result.user_embedding_id,
+                "video_embedding_id": match_result.video_embedding_id,
                 "pool_id": match_result.pool_id,
                 "track_id": match_result.track_id,
                 "camera_id": match_result.camera_id,
@@ -586,6 +572,7 @@ class MatchingConsumer:
                 "margin_threshold_used": match_result.margin_threshold_used,
                 "decision_reason": match_result.decision_reason,
                 "decision_explanation": match_result.decision_explanation,
+                "top_candidates": match_result.top_candidates,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             },
             significant_improvement_margin=max(
@@ -601,6 +588,8 @@ class MatchingConsumer:
     ) -> None:
         outbound = {
             "user_id": match_result.user_id,
+            "user_embedding_id": match_result.user_embedding_id,
+            "video_embedding_id": match_result.video_embedding_id,
             "pool_id": match_result.pool_id,
             "track_id": match_result.track_id,
             "camera_id": match_result.camera_id,
@@ -625,6 +614,7 @@ class MatchingConsumer:
             "margin_threshold_used": match_result.margin_threshold_used,
             "decision_reason": match_result.decision_reason,
             "decision_explanation": match_result.decision_explanation,
+            "top_candidates": match_result.top_candidates,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -774,6 +764,16 @@ class MatchingConsumer:
                         "decision_explanation": explanation,
                         "frames_count": frames_count,
                         "embeddings_count": embeddings_count,
+                        "user_embedding_id": None
+                        if match_attempt is None or match_attempt.match_result is None
+                        else match_attempt.match_result.user_embedding_id,
+                        "video_embedding_id": payload.get("video_embedding_id"),
+                        "top_candidates": []
+                        if match_attempt is None
+                        else match_attempt.top_candidates,
+                        "embeddings_used": None
+                        if match_attempt is None or match_attempt.match_result is None
+                        else match_attempt.match_result.embeddings_used,
                         "persist_status": persist_status,
                         "processed_at": datetime.now(timezone.utc).isoformat(),
                         "existing_user_id": None if write_result is None else write_result.existing_user_id,

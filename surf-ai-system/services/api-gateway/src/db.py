@@ -90,6 +90,8 @@ class SQLiteDB:
                 CREATE TABLE IF NOT EXISTS matches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
+                    user_embedding_id TEXT,
+                    video_embedding_id TEXT,
                     track_id TEXT NOT NULL,
                     camera_id TEXT,
                     video_id TEXT,
@@ -113,11 +115,14 @@ class SQLiteDB:
                     margin_threshold_used REAL,
                     decision_reason TEXT,
                     decision_explanation TEXT,
+                    top_candidates_json TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(user_id, track_id)
                 )
                 """
             )
+            self._ensure_column(conn, "matches", "user_embedding_id", "TEXT")
+            self._ensure_column(conn, "matches", "video_embedding_id", "TEXT")
             self._ensure_column(conn, "matches", "camera_id", "TEXT")
             self._ensure_column(conn, "matches", "video_id", "TEXT")
             self._ensure_column(conn, "matches", "source_video_s3", "TEXT")
@@ -134,6 +139,7 @@ class SQLiteDB:
             self._ensure_column(conn, "matches", "margin_threshold_used", "REAL")
             self._ensure_column(conn, "matches", "decision_reason", "TEXT")
             self._ensure_column(conn, "matches", "decision_explanation", "TEXT")
+            self._ensure_column(conn, "matches", "top_candidates_json", "TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_matches_user_created
@@ -623,6 +629,8 @@ class SQLiteDB:
                 SELECT
                     id AS match_id,
                     user_id,
+                    user_embedding_id,
+                    video_embedding_id,
                     track_id,
                     camera_id,
                     video_id,
@@ -646,6 +654,7 @@ class SQLiteDB:
                     margin_threshold_used,
                     decision_reason,
                     decision_explanation,
+                    top_candidates_json,
                     pool_id,
                     created_at
                 FROM matches
@@ -660,7 +669,7 @@ class SQLiteDB:
         """
         with self.store.connection() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [dict(row) for row in rows]
+        return [self._match_from_row(row) for row in rows]
 
     def list_matches_for_video(
         self,
@@ -672,6 +681,8 @@ class SQLiteDB:
                 SELECT
                     m.id AS match_id,
                     m.user_id,
+                    m.user_embedding_id,
+                    m.video_embedding_id,
                     u.email,
                     u.pool_id,
                 m.track_id,
@@ -696,6 +707,7 @@ class SQLiteDB:
                 m.margin_threshold_used,
                 m.decision_reason,
                 m.decision_explanation,
+                m.top_candidates_json,
                 m.pool_id AS match_pool_id,
                 m.created_at
             FROM matches m
@@ -709,7 +721,7 @@ class SQLiteDB:
         query += " ORDER BY m.score DESC, datetime(m.created_at) DESC, m.id DESC"
         with self.store.connection() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [dict(row) for row in rows]
+        return [self._match_from_row(row) for row in rows]
 
     def list_video_assignments(
         self,
@@ -772,6 +784,18 @@ class SQLiteDB:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _match_from_row(self, row) -> dict[str, Any]:
+        item = dict(row)
+        raw_top_candidates = item.pop("top_candidates_json", None)
+        if raw_top_candidates:
+            try:
+                item["top_candidates"] = json.loads(raw_top_candidates)
+            except json.JSONDecodeError:
+                item["top_candidates"] = []
+        else:
+            item["top_candidates"] = []
+        return item
 
     def _admin_emails(self) -> set[str]:
         configured = os.environ.get("ADMIN_EMAILS", "").strip()

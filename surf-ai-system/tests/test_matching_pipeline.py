@@ -494,6 +494,104 @@ class MatchingPipelineTests(unittest.TestCase):
             self.assertEqual(metrics.get("matching.total_tracks_processed"), 1)
             self.assertEqual(metrics.get("matching.matches_created"), 1)
 
+    def test_backfill_uses_all_user_embeddings_instead_of_uploaded_single_embedding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "surf_ai.db")
+            pipeline_store = PipelineStore(db_path)
+            users_db = UsersDB(db_path)
+            matches_db = MatchesDB(db_path)
+
+            video = pipeline_store.create_video(
+                video_id="video-1",
+                s3_path="s3://bucket/uploads/videos/video-1.mp4",
+                pool_id="pool-1",
+            )
+            stored_track = pipeline_store.upsert_video_embedding(
+                video_id=video["video_id"],
+                track_id="track-1",
+                pool_id="pool-1",
+                embedding=[1.0, 0.0, 0.0],
+                frames_count=4,
+                frames_received=8,
+                embeddings_created=4,
+                confidence=0.94,
+                consistency=0.92,
+                quality_avg=0.87,
+                aggregation_method="mean_top_k_quality",
+                keyframe_s3="s3://bucket/keyframes/track-1.jpg",
+            )
+
+            self._insert_user(
+                users_db,
+                "user-a",
+                "a@example.com",
+                "pool-1",
+                [
+                    [0.0, 1.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                ],
+            )
+            self._insert_user(users_db, "user-b", "b@example.com", "pool-1", [[0.8, 0.6, 0.0]])
+
+            config = ConfigStub()
+            config.users_db_path = db_path
+            config.matches_db_path = db_path
+            config.sqlite_db_path = db_path
+            matcher = Matcher(users_db=users_db, config=config)
+            consumer = MatchingConsumer(
+                config=config,
+                matcher=matcher,
+                matches_db=matches_db,
+                pipeline_store=pipeline_store,
+                metrics=MetricsRegistry(),
+            )
+            consumer.sqs_client = FakeSQSClient()
+
+            live_attempt = matcher.evaluate_match(
+                {
+                    "job_type": "track_embedding_match",
+                    "track_id": "track-1",
+                    "pool_id": "pool-1",
+                    "video_id": "video-1",
+                    "video_embedding_id": stored_track["video_embedding_id"],
+                    "track_embedding": [1.0, 0.0, 0.0],
+                    "frames_count": 4,
+                    "consistency": 0.92,
+                }
+            )
+
+            self.assertIsNotNone(live_attempt.match_result)
+            assert live_attempt.match_result is not None
+            self.assertEqual(live_attempt.match_result.user_id, "user-a")
+            self.assertEqual(live_attempt.match_result.embeddings_used, 2)
+
+            consumer._process_backfill_user_job(
+                {
+                    "job_type": "backfill_user_matches",
+                    "pool_id": "pool-1",
+                    "user_id": "user-a",
+                    "user_embedding_id": "upload-2",
+                    "user_embedding": [0.0, 1.0, 0.0],
+                    "batch_size": 10,
+                }
+            )
+
+            with matches_db.store.connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT user_id, user_embedding_id, video_embedding_id, embeddings_used
+                    FROM matches
+                    WHERE track_id = 'track-1'
+                    """
+                ).fetchone()
+
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["user_id"], "user-a")
+            self.assertEqual(str(row["user_embedding_id"]), "2")
+            self.assertEqual(row["video_embedding_id"], stored_track["video_embedding_id"])
+            self.assertEqual(int(row["embeddings_used"]), 2)
+
     def test_matching_consumer_dead_letters_invalid_message(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "surf_ai.db")
@@ -781,6 +879,101 @@ class MatchingPipelineTests(unittest.TestCase):
             self.assertAlmostEqual(float(row["threshold_used"]), 0.75, places=4)
             self.assertAlmostEqual(float(row["margin_threshold_used"]), 0.05, places=4)
             self.assertEqual(row["decision_explanation"], "Match accepted because similarity and margin both passed")
+
+    def test_match_persistence_stores_embedding_traceability_and_top_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "surf_ai.db")
+            pipeline_store = PipelineStore(db_path)
+            users_db = UsersDB(db_path)
+            matches_db = MatchesDB(db_path)
+
+            video = pipeline_store.create_video(
+                video_id="video-1",
+                s3_path="s3://bucket/uploads/videos/video-1.mp4",
+                pool_id="pool-1",
+            )
+            stored_track = pipeline_store.upsert_video_embedding(
+                video_id=video["video_id"],
+                track_id="track-1",
+                pool_id="pool-1",
+                embedding=[1.0, 0.0, 0.0],
+                frames_count=4,
+                frames_received=6,
+                embeddings_created=4,
+                confidence=0.96,
+                consistency=0.94,
+                quality_avg=0.9,
+                aggregation_method="mean_top_k_quality",
+                keyframe_s3="s3://bucket/keyframes/track-1.jpg",
+            )
+            self._insert_user(
+                users_db,
+                "user-a",
+                "a@example.com",
+                "pool-1",
+                [[0.98, 0.2, 0.0], [1.0, 0.0, 0.0]],
+            )
+            self._insert_user(users_db, "user-b", "b@example.com", "pool-1", [[0.8, 0.6, 0.0]])
+            self._insert_user(users_db, "user-c", "c@example.com", "pool-1", [[0.2, 0.98, 0.0]])
+
+            config = ConfigStub()
+            config.users_db_path = db_path
+            config.matches_db_path = db_path
+            config.sqlite_db_path = db_path
+            matcher = Matcher(users_db=users_db, config=config)
+            consumer = MatchingConsumer(
+                config=config,
+                matcher=matcher,
+                matches_db=matches_db,
+                pipeline_store=pipeline_store,
+                metrics=MetricsRegistry(),
+            )
+            consumer.sqs_client = FakeSQSClient()
+
+            outcome = consumer._match_and_persist(
+                {
+                    "job_type": "track_embedding_match",
+                    "track_id": "track-1",
+                    "pool_id": "pool-1",
+                    "video_id": "video-1",
+                    "video_embedding_id": stored_track["video_embedding_id"],
+                    "track_embedding": [1.0, 0.0, 0.0],
+                    "frames_count": 4,
+                    "consistency": 0.95,
+                }
+            )
+
+            self.assertEqual(outcome, "matched")
+            with matches_db.store.connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT user_id, user_embedding_id, video_embedding_id, embeddings_used,
+                           best_similarity, second_best_similarity, margin, top_candidates_json
+                    FROM matches
+                    WHERE track_id = 'track-1'
+                    """
+                ).fetchone()
+
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["user_id"], "user-a")
+            self.assertEqual(str(row["user_embedding_id"]), "2")
+            self.assertEqual(row["video_embedding_id"], stored_track["video_embedding_id"])
+            self.assertEqual(int(row["embeddings_used"]), 2)
+            self.assertAlmostEqual(float(row["best_similarity"]), 1.0, places=4)
+            self.assertAlmostEqual(float(row["second_best_similarity"]), 0.8, places=4)
+            self.assertAlmostEqual(float(row["margin"]), 0.2, places=4)
+
+            top_candidates = json.loads(row["top_candidates_json"])
+            self.assertEqual(len(top_candidates), 3)
+            self.assertEqual(top_candidates[0]["rank"], 1)
+            self.assertEqual(top_candidates[0]["user_id"], "user-a")
+            self.assertEqual(str(top_candidates[0]["user_embedding_id"]), "2")
+            self.assertEqual(int(top_candidates[0]["embeddings_used"]), 2)
+            self.assertAlmostEqual(float(top_candidates[0]["margin"]), 0.0, places=4)
+            self.assertEqual(top_candidates[1]["rank"], 2)
+            self.assertEqual(top_candidates[1]["user_id"], "user-b")
+            self.assertAlmostEqual(float(top_candidates[1]["margin"]), 0.2, places=4)
 
     def test_match_storage_keeps_existing_track_when_new_score_is_not_significantly_better(self):
         with tempfile.TemporaryDirectory() as temp_dir:

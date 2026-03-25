@@ -20,6 +20,8 @@ logger = get_logger("matcher")
 @dataclass
 class MatchResult:
     user_id: str
+    user_embedding_id: str | None
+    video_embedding_id: str | None
     pool_id: str | None
     track_id: str
     camera_id: str | None
@@ -44,6 +46,7 @@ class MatchResult:
     margin_threshold_used: float
     decision_reason: str | None
     decision_explanation: str
+    top_candidates: list[dict[str, Any]]
 
 
 @dataclass
@@ -52,6 +55,7 @@ class MatchAttempt:
     decision: MatchDecision
     track_id: str | None
     best_user_id: str | None
+    top_candidates: list[dict[str, Any]]
 
 
 class ExactTrackEmbeddingSearchEngine:
@@ -115,6 +119,7 @@ class Matcher:
                 ),
                 track_id=payload.get("track_id"),
                 best_user_id=None,
+                top_candidates=[],
             )
 
         track_embedding = self._extract_track_embedding(payload)
@@ -150,12 +155,14 @@ class Matcher:
             quality_avg=quality_avg,
         )
         ranked_candidates = evaluation.ranked_candidates
+        top_candidates = self._summarize_top_candidates(ranked_candidates)
         if not ranked_candidates:
             return MatchAttempt(
                 match_result=None,
                 decision=evaluation.decision,
                 track_id=payload.get("track_id"),
                 best_user_id=None,
+                top_candidates=top_candidates,
             )
 
         best_candidate = evaluation.best_candidate
@@ -187,6 +194,7 @@ class Matcher:
                 decision=decision,
                 track_id=payload.get("track_id"),
                 best_user_id=best_candidate.user_id,
+                top_candidates=top_candidates,
             )
 
         match_result = self._build_match_result(
@@ -197,12 +205,14 @@ class Matcher:
             payload_consistency=payload_consistency,
             force_match_used=False,
             decision=decision,
+            top_candidates=top_candidates,
         )
         return MatchAttempt(
             match_result=match_result,
             decision=decision,
             track_id=payload.get("track_id"),
             best_user_id=best_candidate.user_id,
+            top_candidates=top_candidates,
         )
 
     def _extract_track_embedding(self, payload: dict[str, Any]) -> np.ndarray:
@@ -304,10 +314,13 @@ class Matcher:
         payload_consistency: float | None,
         force_match_used: bool,
         decision: MatchDecision,
+        top_candidates: list[dict[str, Any]],
     ) -> MatchResult:
         confidence = max(0.0, min(1.0, 1.0 - best_candidate.aggregated_distance))
         return MatchResult(
             user_id=best_candidate.user_id,
+            user_embedding_id=best_candidate.best_user_embedding_id,
+            video_embedding_id=payload.get("video_embedding_id"),
             pool_id=payload.get("pool_id"),
             track_id=str(payload["track_id"]),
             camera_id=payload.get("camera_id"),
@@ -322,7 +335,7 @@ class Matcher:
             mean_distance=best_candidate.mean_distance,
             max_distance=best_candidate.max_distance,
             distance_std=best_candidate.distance_std,
-            embeddings_used=1,
+            embeddings_used=best_candidate.embeddings_compared,
             track_evidence_count=evidence_count,
             payload_consistency=payload_consistency,
             second_best_score=None if second_best_candidate is None else second_best_candidate.best_similarity,
@@ -332,7 +345,35 @@ class Matcher:
             margin_threshold_used=decision.margin_threshold_used,
             decision_reason=decision.decision_reason,
             decision_explanation=decision.explanation,
+            top_candidates=top_candidates,
         )
+
+    def _summarize_top_candidates(
+        self,
+        ranked_candidates: list[CandidateScore],
+        *,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        if not ranked_candidates:
+            return []
+
+        best_similarity = float(ranked_candidates[0].best_similarity)
+        top_candidates: list[dict[str, Any]] = []
+        for index, candidate in enumerate(ranked_candidates[: max(int(limit), 1)], start=1):
+            top_candidates.append(
+                {
+                    "rank": index,
+                    "user_id": candidate.user_id,
+                    "user_embedding_id": candidate.best_user_embedding_id,
+                    "score": float(candidate.best_similarity),
+                    "similarity": float(candidate.best_similarity),
+                    "distance": float(candidate.aggregated_distance),
+                    "final_score": float(candidate.final_score),
+                    "margin": float(best_similarity - candidate.best_similarity),
+                    "embeddings_used": int(candidate.embeddings_compared),
+                }
+            )
+        return top_candidates
 
     def _get_video_id(self, payload: dict[str, Any]) -> str | None:
         return payload.get("video_id") or payload.get("source_video_id")
