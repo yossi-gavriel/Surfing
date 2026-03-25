@@ -47,34 +47,34 @@ textarea {
   text-align: start;
 }
 
-app-admin-page .hero,
-app-admin-page .section-header,
-app-admin-page .hero-actions,
-app-admin-page .video-row,
-app-admin-page .debug-row,
-app-admin-page .user-row,
-app-admin-page .camera-row,
-app-admin-page .pool-row,
-app-admin-page .actions,
-app-admin-page .assign-bar {
+.admin-page .hero,
+.admin-page .section-header,
+.admin-page .hero-actions,
+.admin-page .video-row,
+.admin-page .debug-row,
+.admin-page .user-row,
+.admin-page .camera-row,
+.admin-page .pool-row,
+.admin-page .actions,
+.admin-page .assign-bar {
   display: flex;
   justify-content: space-between;
   gap: 0.85rem;
 }
 
-app-admin-page .hero {
+.admin-page .hero {
   align-items: end;
   margin-bottom: 1.5rem;
 }
 
-app-admin-page .hero-actions {
+.admin-page .hero-actions {
   align-items: center;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 
-app-admin-page .eyebrow,
-app-admin-page .panel-label {
+.admin-page .eyebrow,
+.admin-page .panel-label {
   margin: 0 0 0.5rem;
   text-transform: uppercase;
   letter-spacing: 0.18em;
@@ -82,32 +82,32 @@ app-admin-page .panel-label {
   font-size: 0.78rem;
 }
 
-app-admin-page h2,
-app-admin-page h3 {
+.admin-page h2,
+.admin-page h3 {
   margin: 0;
   color: var(--ink-strong);
   font-family: 'Space Grotesk', sans-serif;
 }
 
-app-admin-page h2 {
+.admin-page h2 {
   font-size: 2.5rem;
   max-width: 15ch;
 }
 
-app-admin-page h3 {
+.admin-page h3 {
   font-size: 1.45rem;
 }
 
-app-admin-page .subcopy {
+.admin-page .subcopy {
   margin: 0.8rem 0 0;
   color: var(--ink-soft);
   max-width: 60ch;
   line-height: 1.7;
 }
 
-app-admin-page .panel,
-app-admin-page .feedback,
-app-admin-page .state-card {
+.admin-page .panel,
+.admin-page .feedback,
+.admin-page .state-card {
   border-radius: 28px;
   border: 1px solid rgba(20, 60, 68, 0.12);
   background: rgba(255, 252, 245, 0.9);
@@ -115,29 +115,29 @@ app-admin-page .state-card {
   padding: 1.5rem;
 }
 
-app-admin-page .feedback,
-app-admin-page .state-card {
+.admin-page .feedback,
+.admin-page .state-card {
   margin-bottom: 1rem;
 }
 
-app-admin-page .feedback.error,
-app-admin-page .error-copy {
+.admin-page .feedback.error,
+.admin-page .error-copy {
   color: #a7341b;
 }
 
-app-admin-page .feedback.success {
+.admin-page .feedback.success {
   color: #1d6d4f;
 }
 
-app-admin-page .tabs {
+.admin-page .tabs {
   display: flex;
   gap: 0.75rem;
   flex-wrap: wrap;
   margin-bottom: 1rem;
 }
 
-app-admin-page .tab-button,
-app-admin-page button {
+.admin-page .tab-button,
+.admin-page button {
   border: none;
   border-radius: 999px;
   padding: 0.9rem 1.2rem;
@@ -148,26 +148,26 @@ app-admin-page button {
   cursor: pointer;
 }
 
-app-admin-page .tab-button,
-app-admin-page button.secondary {
+.admin-page .tab-button,
+.admin-page button.secondary {
   background: rgba(20, 60, 68, 0.08);
   color: var(--ink-strong);
 }
 
-app-admin-page .tab-button.active {
+.admin-page .tab-button.active {
   background: linear-gradient(135deg, var(--accent-deep), var(--accent));
   color: white;
 }
 
-app-admin-page button:disabled {
+.admin-page button:disabled {
   opacity: 0.7;
   cursor: wait;
 }
 
-app-admin-page .pill,
-app-admin-page .status,
-app-admin-page .metrics span,
-app-admin-page .stage {
+.admin-page .pill,
+.admin-page .status,
+.admin-page .metrics span,
+.admin-page .stage {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -176,122 +176,122 @@ app-admin-page .stage {
   font-size: 0.82rem;
 }
 
-app-admin-page .pill,
-app-admin-page .metrics span,
-app-admin-page .stage {
+.admin-page .pill,
+.admin-page .metrics span,
+.admin-page .stage {
   background: rgba(20, 82, 96, 0.08);
   color: var(--ink-soft);
 }
 
-app-admin-page .pill.live,
-app-admin-page .status.completed,
-app-admin-page .stage.active {
+.admin-page .pill.live,
+.admin-page .status.completed,
+.admin-page .stage.active {
   background: rgba(29, 109, 79, 0.14);
   color: #1d6d4f;
 }
 
-app-admin-page .status {
+.admin-page .status {
   background: rgba(20, 82, 96, 0.12);
   color: var(--accent-deep);
   text-transform: capitalize;
 }
 
-app-admin-page .status.failed,
-app-admin-page .stage.failed {
+.admin-page .status.failed,
+.admin-page .stage.failed {
   background: rgba(167, 52, 27, 0.12);
   color: #a7341b;
 }
 
-app-admin-page .summary-grid,
-app-admin-page .overview-grid,
-app-admin-page .status-grid,
-app-admin-page .video-list,
-app-admin-page .debug-list,
-app-admin-page .user-list,
-app-admin-page .camera-list,
-app-admin-page .pool-list,
-app-admin-page .debug-quick-list,
-app-admin-page .calibration-upload-grid,
-app-admin-page .calibration-grid,
-app-admin-page .config-grid,
-app-admin-page .calibration-metrics,
-app-admin-page .image-compare-grid {
+.admin-page .summary-grid,
+.admin-page .overview-grid,
+.admin-page .status-grid,
+.admin-page .video-list,
+.admin-page .debug-list,
+.admin-page .user-list,
+.admin-page .camera-list,
+.admin-page .pool-list,
+.admin-page .debug-quick-list,
+.admin-page .calibration-upload-grid,
+.admin-page .calibration-grid,
+.admin-page .config-grid,
+.admin-page .calibration-metrics,
+.admin-page .image-compare-grid {
   display: grid;
   gap: 1rem;
   margin-top: 1rem;
 }
 
-app-admin-page .summary-grid {
+.admin-page .summary-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-app-admin-page .overview-grid {
+.admin-page .overview-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-app-admin-page .status-grid {
+.admin-page .status-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-app-admin-page .calibration-upload-grid,
-app-admin-page .image-compare-grid {
+.admin-page .calibration-upload-grid,
+.admin-page .image-compare-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-app-admin-page .calibration-grid,
-app-admin-page .config-grid {
+.admin-page .calibration-grid,
+.admin-page .config-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-app-admin-page .calibration-metrics {
+.admin-page .calibration-metrics {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-app-admin-page .summary-card,
-app-admin-page .overview-card,
-app-admin-page .video-upload-card,
-app-admin-page .config-card,
-app-admin-page .video-row,
-app-admin-page .debug-row,
-app-admin-page .user-row,
-app-admin-page .camera-row,
-app-admin-page .pool-row {
+.admin-page .summary-card,
+.admin-page .overview-card,
+.admin-page .video-upload-card,
+.admin-page .config-card,
+.admin-page .video-row,
+.admin-page .debug-row,
+.admin-page .user-row,
+.admin-page .camera-row,
+.admin-page .pool-row {
   border-radius: 22px;
   border: 1px solid rgba(20, 60, 68, 0.08);
   background: rgba(255, 255, 255, 0.82);
 }
 
-app-admin-page .summary-card,
-app-admin-page .overview-card,
-app-admin-page .video-upload-card,
-app-admin-page .config-card {
+.admin-page .summary-card,
+.admin-page .overview-card,
+.admin-page .video-upload-card,
+.admin-page .config-card {
   padding: 1.2rem;
 }
 
-app-admin-page .video-row,
-app-admin-page .debug-row,
-app-admin-page .user-row,
-app-admin-page .camera-row,
-app-admin-page .pool-row {
+.admin-page .video-row,
+.admin-page .debug-row,
+.admin-page .user-row,
+.admin-page .camera-row,
+.admin-page .pool-row {
   align-items: center;
   padding: 1rem;
 }
 
-app-admin-page .summary-card span,
-app-admin-page .summary-card small,
-app-admin-page .compact-copy,
-app-admin-page .empty,
-app-admin-page .video-copy small,
-app-admin-page .user-copy span,
-app-admin-page .user-copy small,
-app-admin-page .camera-row span,
-app-admin-page .pool-row span,
-app-admin-page label span,
-app-admin-page .debug-link span {
+.admin-page .summary-card span,
+.admin-page .summary-card small,
+.admin-page .compact-copy,
+.admin-page .empty,
+.admin-page .video-copy small,
+.admin-page .user-copy span,
+.admin-page .user-copy small,
+.admin-page .camera-row span,
+.admin-page .pool-row span,
+.admin-page label span,
+.admin-page .debug-link span {
   color: var(--ink-soft);
 }
 
-app-admin-page .summary-card strong {
+.admin-page .summary-card strong {
   display: block;
   margin: 0.4rem 0;
   font-size: 2rem;
@@ -299,80 +299,80 @@ app-admin-page .summary-card strong {
   font-family: 'Space Grotesk', sans-serif;
 }
 
-app-admin-page .debug-link,
-app-admin-page .video-copy,
-app-admin-page .user-copy,
-app-admin-page .camera-row div,
-app-admin-page .pool-row div,
-app-admin-page .config-card,
-app-admin-page .image-card {
+.admin-page .debug-link,
+.admin-page .video-copy,
+.admin-page .user-copy,
+.admin-page .camera-row div,
+.admin-page .pool-row div,
+.admin-page .config-card,
+.admin-page .image-card {
   display: grid;
   gap: 0.3rem;
   min-width: 0;
 }
 
-app-admin-page .config-card,
-app-admin-page .image-card {
+.admin-page .config-card,
+.admin-page .image-card {
   gap: 0.85rem;
 }
 
-app-admin-page .debug-link {
+.admin-page .debug-link {
   text-align: start;
   background: rgba(20, 60, 68, 0.06);
   color: var(--ink-strong);
 }
 
-app-admin-page .video-headline,
-app-admin-page .metrics,
-app-admin-page .pipeline-stages {
+.admin-page .video-headline,
+.admin-page .metrics,
+.admin-page .pipeline-stages {
   display: flex;
   gap: 0.45rem;
   flex-wrap: wrap;
 }
 
-app-admin-page .video-headline {
+.admin-page .video-headline {
   gap: 0.75rem;
   align-items: center;
 }
 
-app-admin-page .metrics,
-app-admin-page .pipeline-stages {
+.admin-page .metrics,
+.admin-page .pipeline-stages {
   margin-top: 0.5rem;
 }
 
-app-admin-page .video-copy strong,
-app-admin-page .user-copy strong,
-app-admin-page .camera-row strong,
-app-admin-page .pool-row strong {
+.admin-page .video-copy strong,
+.admin-page .user-copy strong,
+.admin-page .camera-row strong,
+.admin-page .pool-row strong {
   color: var(--ink-strong);
   overflow-wrap: anywhere;
 }
 
-app-admin-page .video-actions {
+.admin-page .video-actions {
   display: grid;
   gap: 0.65rem;
   min-width: 180px;
 }
 
-app-admin-page .hint {
+.admin-page .hint {
   line-height: 1.5;
 }
 
-app-admin-page .assign-bar {
+.admin-page .assign-bar {
   align-items: center;
   margin-top: 0.8rem;
   flex-wrap: wrap;
 }
 
-app-admin-page label {
+.admin-page label {
   display: grid;
   gap: 0.45rem;
   margin-top: 1rem;
 }
 
-app-admin-page input[type='text'],
-app-admin-page input:not([type='checkbox']),
-app-admin-page select {
+.admin-page input[type='text'],
+.admin-page input:not([type='checkbox']),
+.admin-page select {
   width: 100%;
   border: 1px solid rgba(20, 60, 68, 0.16);
   border-radius: 16px;
@@ -382,13 +382,13 @@ app-admin-page select {
   font: inherit;
 }
 
-app-admin-page .checkbox {
+.admin-page .checkbox {
   grid-template-columns: auto 1fr;
   align-items: center;
   gap: 0.75rem;
 }
 
-app-admin-page .dropzone {
+.admin-page .dropzone {
   display: grid;
   gap: 0.5rem;
   border: 1.5px dashed rgba(20, 82, 96, 0.35);
@@ -399,18 +399,18 @@ app-admin-page .dropzone {
   color: var(--ink-strong);
 }
 
-app-admin-page .dropzone input {
+.admin-page .dropzone input {
   display: none;
 }
 
-app-admin-page .dropzone span {
+.admin-page .dropzone span {
   font-weight: 600;
   font-size: 1rem;
 }
 
-app-admin-page .user-row img,
-app-admin-page .user-placeholder,
-app-admin-page .image-card img {
+.admin-page .user-row img,
+.admin-page .user-placeholder,
+.admin-page .image-card img {
   width: 72px;
   height: 72px;
   border-radius: 18px;
@@ -418,62 +418,63 @@ app-admin-page .image-card img {
   background: linear-gradient(135deg, rgba(193, 230, 223, 0.75), rgba(255, 238, 210, 0.8));
 }
 
-app-admin-page .image-card img {
+.admin-page .image-card img {
   width: 100%;
   height: 240px;
 }
 
-app-admin-page .user-placeholder {
+.admin-page .user-placeholder {
   display: grid;
   place-items: center;
   color: var(--ink-soft);
   font-size: 0.8rem;
 }
 
-app-admin-page .verdict {
+.admin-page .verdict {
   text-transform: uppercase;
 }
 
-app-admin-page .calibration-actions {
+.admin-page .calibration-actions {
   margin-top: 1rem;
 }
 
-app-admin-page .empty-state-card {
+.admin-page .empty-state-card {
   display: grid;
   place-items: center;
   min-height: 220px;
 }
 
-app-admin-page a {
+.admin-page a {
   color: var(--accent-deep);
   text-decoration: none;
 }
 
 @media (max-width: 980px) {
-  app-admin-page .hero,
-  app-admin-page .section-header,
-  app-admin-page .video-row,
-  app-admin-page .debug-row,
-  app-admin-page .user-row,
-  app-admin-page .camera-row,
-  app-admin-page .pool-row,
-  app-admin-page .assign-bar {
+  .admin-page .hero,
+  .admin-page .section-header,
+  .admin-page .video-row,
+  .admin-page .debug-row,
+  .admin-page .user-row,
+  .admin-page .camera-row,
+  .admin-page .pool-row,
+  .admin-page .assign-bar {
     flex-direction: column;
     align-items: stretch;
   }
 
-  app-admin-page .summary-grid,
-  app-admin-page .overview-grid,
-  app-admin-page .status-grid,
-  app-admin-page .calibration-upload-grid,
-  app-admin-page .calibration-grid,
-  app-admin-page .config-grid,
-  app-admin-page .calibration-metrics,
-  app-admin-page .image-compare-grid {
+  .admin-page .summary-grid,
+  .admin-page .overview-grid,
+  .admin-page .status-grid,
+  .admin-page .calibration-upload-grid,
+  .admin-page .calibration-grid,
+  .admin-page .config-grid,
+  .admin-page .calibration-metrics,
+  .admin-page .image-compare-grid {
     grid-template-columns: 1fr;
   }
 
-  app-admin-page .video-actions {
+  .admin-page .video-actions {
     min-width: 0;
   }
 }
+
