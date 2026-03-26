@@ -124,7 +124,12 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         return None
     normalized = value.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(normalized)
+        # Pipeline services store timestamps without timezone info; treat them as UTC
+        # so subtraction against timezone-aware datetimes never raises TypeError.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         return None
 
