@@ -197,6 +197,10 @@ import { AdminVideosService } from './admin-videos.service';
 
               <small class="hint">{{ admin.videoOutcomeSummary(video) }}</small>
               <small class="hint" *ngIf="admin.qualityGuardSummary(video)">{{ admin.qualityGuardSummary(video) }}</small>
+              <small class="hint match-result" *ngIf="video.confirmed_match_user_email">
+                {{ admin.i18n.t('admin.matchedUser') }}: {{ video.confirmed_match_user_email }}
+                <span *ngIf="video.confirmed_match_score != null">({{ admin.formatMetric(video.confirmed_match_score) }})</span>
+              </small>
 
               <div class="assign-bar" *ngIf="admin.users().length > 0">
                 <select [ngModel]="admin.assignmentSelection(video)" (ngModelChange)="admin.setAssignmentSelection(video.video_id, $event)">

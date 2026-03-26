@@ -23,6 +23,7 @@ export interface AdminVideo {
   best_match_user_email?: string | null;
   confirmed_match_user_id?: string | null;
   confirmed_match_user_email?: string | null;
+  confirmed_match_score?: number | null;
   assigned_user_id?: string | null;
   assigned_user_email?: string | null;
   threshold?: number;

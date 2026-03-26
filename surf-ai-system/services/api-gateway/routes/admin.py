@@ -189,6 +189,7 @@ def _build_video_pipeline_summary(
         pool_id=video.get("pool_id"),
     )
     matches_count = len(matches)
+    top_match = matches[0] if matches else None
     rejection_rate = None
     if processed_tracks > 0:
         rejection_rate = round((unmatched_tracks / processed_tracks) * 100.0, 2)
@@ -254,6 +255,9 @@ def _build_video_pipeline_summary(
         "tracks_unmatched": unmatched_tracks,
         "tracks_rejected": rejected_tracks,
         "matches_count": matches_count,
+        "confirmed_match_user_id": None if top_match is None else top_match.get("user_id"),
+        "confirmed_match_user_email": None if top_match is None else top_match.get("email"),
+        "confirmed_match_score": None if top_match is None else top_match.get("best_similarity"),
         "rejection_rate": rejection_rate,
         "avg_similarity": None
         if not similarities
