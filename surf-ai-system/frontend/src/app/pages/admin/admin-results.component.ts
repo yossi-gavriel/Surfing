@@ -229,7 +229,7 @@ export class AdminResultsComponent {
       const selectedVideoId = this.context.selectedVideoId();
       const availableVideoIds = this.videos.debugVideos().map((video) => video.video_id);
       this.results.ensureVideoExpanded(selectedVideoId, availableVideoIds);
-    });
+    }, { allowSignalWrites: true });
   }
 
   protected updateQuery(query: string): void {

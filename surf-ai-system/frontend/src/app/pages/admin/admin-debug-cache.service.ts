@@ -25,7 +25,7 @@ export class AdminDebugCacheService {
         this.context.clearForPoolChange();
       }
       this.lastScope = scope;
-    });
+    }, { allowSignalWrites: true });
   }
 
   response(videoId: string): DebugCompareResponse | null {

@@ -54,7 +54,7 @@ export class AdminVideosService {
       }
 
       this.refresh();
-    });
+    }, { allowSignalWrites: true });
 
     this.destroyRef.onDestroy(() => this.stopPolling());
   }

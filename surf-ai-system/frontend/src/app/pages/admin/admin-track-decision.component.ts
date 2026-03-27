@@ -331,7 +331,7 @@ export class AdminTrackDecisionComponent {
         return;
       }
       this.errorMessage.set('');
-    });
+    }, { allowSignalWrites: true });
   }
 
   protected loadTrack(force = false): void {
