@@ -164,6 +164,47 @@ __HTTPS_EOF__
 chmod +x /home/ubuntu/enable_https.sh
 chown ubuntu:ubuntu /home/ubuntu/enable_https.sh
 
+# -----------------------------------------------
+# 12. Install boto3 for watchdog (system-wide)
+# -----------------------------------------------
+echo ">>> Installing Python dependencies for watchdog..."
+apt-get install -y python3-pip
+pip3 install boto3 --quiet
+
+# -----------------------------------------------
+# 13. Setup Watchdog as systemd service
+# -----------------------------------------------
+echo ">>> Installing Surf AI Watchdog..."
+
+# Create log file with correct permissions
+touch /var/log/surf-ai-watchdog.log
+chown ubuntu:ubuntu /var/log/surf-ai-watchdog.log
+
+cat > /etc/systemd/system/surf-ai-watchdog.service << '__WATCHDOG_SVC__'
+[Unit]
+Description=Surf AI Watchdog — auto-shutdown when queues drain
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/surf-ai-system
+EnvironmentFile=/home/ubuntu/surf-ai-system/.env
+ExecStart=/usr/bin/python3 /home/ubuntu/surf-ai-system/infra/watchdog.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+__WATCHDOG_SVC__
+
+systemctl daemon-reload
+systemctl enable surf-ai-watchdog
+systemctl start surf-ai-watchdog
+
 echo "=== Bootstrap Complete - $(date) ==="
 echo "HTTP available at: http://${domain_name}"
 echo "Run ~/enable_https.sh for HTTPS"

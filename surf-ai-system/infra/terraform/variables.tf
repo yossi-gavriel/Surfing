@@ -50,3 +50,18 @@ variable "subnet_id" {
   type        = string
   default     = "subnet-06e1254c339d302e7"
 }
+
+# ── On-demand schedule (CloudWatch cron expressions, UTC) ────────────────────
+# Israel is UTC+3 (IDT) in summer, UTC+2 (IST) in winter.
+# Defaults: start at 6am IDT (03:00 UTC), stop ingestion at 6pm IDT (15:00 UTC).
+variable "schedule_start" {
+  description = "CloudWatch cron expression (UTC) to start EC2 — default 06:00 Israel IDT"
+  type        = string
+  default     = "cron(0 3 * * ? *)"
+}
+
+variable "schedule_stop" {
+  description = "CloudWatch cron expression (UTC) to stop ingestion — default 18:00 Israel IDT"
+  type        = string
+  default     = "cron(0 15 * * ? *)"
+}

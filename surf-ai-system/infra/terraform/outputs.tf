@@ -31,8 +31,29 @@ output "ssh_command" {
 output "start_stop_instructions" {
   description = "Cost optimization: start/stop the EC2 instance"
   value       = <<-EOT
-    Start:  ./scripts/dev.sh up
-    Stop:   ./scripts/dev.sh down
-    Status: ./scripts/dev.sh status
+    Manual:    ./scripts/dev.sh up / down / status
+    Auto:      EC2 starts at 06:00 Israel time, stops when queues drain after 18:00
+    Watchdog:  journalctl -u surf-ai-watchdog -f   (on EC2)
+    Deploy:    ./scripts/deploy_watchdog.sh         (first time only)
   EOT
+}
+
+output "lambda_start_ec2_arn" {
+  description = "ARN of the Lambda that starts the EC2"
+  value       = aws_lambda_function.start_ec2.arn
+}
+
+output "lambda_stop_ingestion_arn" {
+  description = "ARN of the Lambda that stops ingestion (triggers watchdog shutdown)"
+  value       = aws_lambda_function.stop_ingestion.arn
+}
+
+output "schedule_start" {
+  description = "CloudWatch cron that starts EC2"
+  value       = var.schedule_start
+}
+
+output "schedule_stop" {
+  description = "CloudWatch cron that stops ingestion"
+  value       = var.schedule_stop
 }
