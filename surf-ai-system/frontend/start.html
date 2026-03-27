@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Surf AI — System Control</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --teal:   #145260;
+      --green:  #166534;
+      --red:    #7f1d1d;
+      --ink:    #1a2b32;
+      --muted:  #5f7a84;
+      --bg:     #f0f4f5;
+      --card:   #ffffff;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: 24px;
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 8px 40px rgba(20, 60, 68, 0.12);
+      display: grid;
+      gap: 1.5rem;
+    }
+
+    .header { text-align: center; }
+    .header h1 { font-size: 1.6rem; color: var(--ink); }
+    .header p  { color: var(--muted); font-size: 0.9rem; margin-top: 0.3rem; }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1rem 1.25rem;
+      border-radius: 14px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+
+    .dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #94a3b8;
+      transition: background 0.3s;
+    }
+    .dot.running  { background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,0.5); }
+    .dot.stopped  { background: #ef4444; }
+    .dot.pending  { background: #f59e0b; animation: pulse 1s infinite; }
+    .dot.stopping { background: #f97316; animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%,100% { opacity: 1; }
+      50%      { opacity: 0.3; }
+    }
+
+    .status-text { flex: 1; }
+    .status-text strong { display: block; color: var(--ink); }
+    .status-text small  { color: var(--muted); font-size: 0.82rem; }
+
+    .buttons { display: grid; gap: 0.75rem; }
+
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 0.85rem 1.5rem;
+      font: inherit;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      width: 100%;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-start { background: linear-gradient(135deg, #166534, #22c55e); color: white; }
+    .btn-stop  { background: linear-gradient(135deg, #7f1d1d, #ef4444); color: white; }
+    .btn-refresh { background: #f1f5f9; color: var(--ink); }
+
+    .message {
+      padding: 0.85rem 1rem;
+      border-radius: 12px;
+      font-size: 0.88rem;
+      line-height: 1.5;
+      display: none;
+    }
+    .message.info    { background: #eff6ff; color: #1e40af; display: block; }
+    .message.success { background: #f0fdf4; color: #166534; display: block; }
+    .message.warning { background: #fffbeb; color: #92400e; display: block; }
+    .message.error   { background: #fef2f2; color: #991b1b; display: block; }
+
+    .config-note {
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-align: center;
+      border-top: 1px solid #e2e8f0;
+      padding-top: 1rem;
+    }
+    .config-note code {
+      background: #f1f5f9;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+    }
+
+    .admin-link {
+      text-align: center;
+      font-size: 0.85rem;
+    }
+    .admin-link a { color: var(--teal); text-decoration: none; font-weight: 500; }
+    .admin-link a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <div class="header">
+    <h1>🌊 Surf AI</h1>
+    <p>System Control Panel</p>
+  </div>
+
+  <div class="status-row">
+    <div class="dot" id="dot"></div>
+    <div class="status-text">
+      <strong id="state-label">Checking…</strong>
+      <small id="state-msg"></small>
+    </div>
+  </div>
+
+  <div class="message" id="msg"></div>
+
+  <div class="buttons">
+    <button class="btn-start" id="btn-start" onclick="startSystem()" disabled>
+      ▶ Start System
+    </button>
+    <button class="btn-stop" id="btn-stop" onclick="stopSystem()" disabled>
+      ■ Stop System
+    </button>
+    <button class="btn-refresh" onclick="loadStatus()">↻ Refresh Status</button>
+  </div>
+
+  <div class="admin-link">
+    <a href="https://surfing.heyi.co.il/admin" target="_blank">Open Admin Dashboard →</a>
+  </div>
+
+  <div class="config-note">
+    API: <code id="api-display">not configured</code>
+  </div>
+</div>
+
+<script>
+  // ── Configuration ──────────────────────────────────────────────────────────
+  // Set SURF_AI_CONTROL_API to your API Gateway invoke URL.
+  // Example: https://abc123def.execute-api.us-east-1.amazonaws.com
+  const API_BASE = window.SURF_AI_CONTROL_API || 'https://djcqadh3mg.execute-api.us-east-1.amazonaws.com';
+
+  document.getElementById('api-display').textContent = API_BASE || 'not configured';
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  let currentState = 'unknown';
+
+  const dot        = document.getElementById('dot');
+  const stateLabel = document.getElementById('state-label');
+  const stateMsg   = document.getElementById('state-msg');
+  const msgBox     = document.getElementById('msg');
+  const btnStart   = document.getElementById('btn-start');
+  const btnStop    = document.getElementById('btn-stop');
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function showMsg(text, type = 'info') {
+    msgBox.textContent = text;
+    msgBox.className = `message ${type}`;
+  }
+
+  function clearMsg() {
+    msgBox.className = 'message';
+    msgBox.textContent = '';
+  }
+
+  function updateUI(state, label, message) {
+    currentState = state;
+
+    dot.className = `dot ${state}`;
+    stateLabel.textContent = label;
+    stateMsg.textContent   = message;
+
+    btnStart.disabled = ['running', 'pending'].includes(state);
+    btnStop.disabled  = ['stopped', 'stopping', 'shutting-down'].includes(state);
+  }
+
+  // ── API calls ──────────────────────────────────────────────────────────────
+  async function loadStatus() {
+    if (!API_BASE || API_BASE === '__SURF_AI_CONTROL_API__') {
+      updateUI('unknown', 'Not Configured', 'Set API_BASE in this file');
+      return;
+    }
+    try {
+      const res  = await fetch(`${API_BASE}/system-status`);
+      const data = await res.json();
+      updateUI(data.state, data.label, data.message);
+    } catch (e) {
+      updateUI('unknown', 'Unreachable', 'Could not contact control API');
+    }
+  }
+
+  async function startSystem() {
+    if (!API_BASE || API_BASE === '__SURF_AI_CONTROL_API__') return;
+    btnStart.disabled = true;
+    btnStart.textContent = 'Starting…';
+    clearMsg();
+
+    try {
+      const res  = await fetch(`${API_BASE}/start-system`, { method: 'POST' });
+      const data = await res.json();
+      showMsg(data.message, data.status === 'already_running' ? 'success' : 'info');
+      await loadStatus();
+
+      if (data.status === 'starting') {
+        showMsg('System is starting (~60 seconds). Polling for ready state…', 'warning');
+        pollUntilRunning();
+      }
+    } catch (e) {
+      showMsg('Failed to start system: ' + e.message, 'error');
+    } finally {
+      btnStart.textContent = '▶ Start System';
+    }
+  }
+
+  async function stopSystem() {
+    if (!API_BASE || API_BASE === '__SURF_AI_CONTROL_API__') return;
+    if (!confirm('Stop the surf system? Pipeline will drain before EC2 shuts down.')) return;
+
+    btnStop.disabled = true;
+    btnStop.textContent = 'Stopping…';
+    clearMsg();
+
+    try {
+      const res  = await fetch(`${API_BASE}/stop-system`, { method: 'POST' });
+      const data = await res.json();
+      showMsg(data.message, 'warning');
+      await loadStatus();
+    } catch (e) {
+      showMsg('Failed to stop system: ' + e.message, 'error');
+    } finally {
+      btnStop.textContent = '■ Stop System';
+    }
+  }
+
+  function pollUntilRunning(attempts = 0, max = 24) {
+    if (attempts >= max) {
+      showMsg('Timed out waiting for system to start. Try refreshing manually.', 'error');
+      return;
+    }
+    setTimeout(async () => {
+      await loadStatus();
+      if (currentState === 'running') {
+        showMsg('✓ System is running!', 'success');
+        clearMsg();
+        setTimeout(clearMsg, 5000);
+      } else {
+        pollUntilRunning(attempts + 1, max);
+      }
+    }, 5000);
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  loadStatus();
+</script>
+
+</body>
+</html>
