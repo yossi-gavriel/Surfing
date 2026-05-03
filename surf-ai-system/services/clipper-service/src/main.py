@@ -145,6 +145,31 @@ def process_clip(msg_body: dict, clipper: VideoClipper):
         s3_client.upload_file(local_output, config.s3_bucket, s3_dest_key)
         logger.info(f"[{track_id}] Output mapping successfully bridged native bounds logically physically securely directly straight mapping: s3://{config.s3_bucket}/{s3_dest_key}")
         
+        # 3b. Publish to analysis queue if enabled
+        if config.analysis_enabled and config.analysis_sqs_url:
+            analysis_msg = {
+                "message_type": "clip_ready",
+                "track_id": track_id,
+                "video_id": msg_body.get("video_id"),
+                "user_id": msg_body.get("user_id"),
+                "pool_id": msg_body.get("pool_id"),
+                "camera_id": camera_id,
+                "clip_s3": f"s3://{config.s3_bucket}/{s3_dest_key}",
+                "source_video_s3": source_video_s3,
+                "start_time": start_time_iso,
+                "end_time": end_time_iso,
+                "match_confidence": msg_body.get("confidence"),
+                "idempotency_key": f"analysis:{msg_body.get('video_id')}:{track_id}:{start_time_iso}",
+            }
+            try:
+                sqs_client.send_message(
+                    QueueUrl=config.analysis_sqs_url,
+                    MessageBody=json.dumps(analysis_msg),
+                )
+                logger.info(f"[{track_id}] Published clip_ready to analysis queue")
+            except Exception as analysis_err:
+                logger.warning(f"[{track_id}] Failed to publish to analysis queue (non-blocking): {analysis_err}")
+
         # 4. Generate & Upload Thumbnail gracefully
         local_thumb = f"/tmp/{camera_id}_{track_id}_thumb.jpg"
         import subprocess

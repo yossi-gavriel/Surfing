@@ -287,6 +287,58 @@ class PipelineStore:
                 """
             )
 
+            # Analysis service job tracking
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS analysis_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    track_id TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    user_id TEXT,
+                    pool_id TEXT,
+                    camera_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    failure_code TEXT,
+                    failure_reason TEXT,
+                    retryable INTEGER NOT NULL DEFAULT 1,
+                    clip_s3 TEXT NOT NULL,
+                    canonical_s3 TEXT,
+                    debug_s3 TEXT,
+                    ride_duration_seconds REAL,
+                    dominant_direction TEXT,
+                    ride_score REAL,
+                    maneuver_count INTEGER,
+                    model_version TEXT,
+                    analysis_duration_ms INTEGER,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(track_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_analysis_jobs_status
+                ON analysis_jobs(status, updated_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_analysis_jobs_user
+                ON analysis_jobs(user_id, datetime(created_at) DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_analysis_jobs_pool
+                ON analysis_jobs(pool_id, datetime(created_at) DESC)
+                """
+            )
+            self._ensure_column(conn, "analysis_jobs", "started_at", "TEXT")
+
     def create_video(
         self,
         *,
@@ -1570,6 +1622,87 @@ class PipelineStore:
             "diagnostics": diagnostics,
             "error_message": row["error_message"],
             "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    # Analysis jobs
+
+    def get_analysis_job(self, track_id: str) -> dict[str, Any] | None:
+        """Get analysis job by track_id."""
+        with self.store.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_jobs WHERE track_id = ?",
+                (track_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._serialize_analysis_job(row)
+
+    def list_analysis_jobs_for_user(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List analysis jobs for a specific user, newest first."""
+        query = "SELECT * FROM analysis_jobs WHERE user_id = ?"
+        params: list[Any] = [user_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY datetime(created_at) DESC LIMIT ?"
+        params.append(limit)
+
+        with self.store.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._serialize_analysis_job(r) for r in rows]
+
+    def list_analysis_jobs_for_pool(
+        self,
+        pool_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List analysis jobs for a pool, newest first."""
+        query = "SELECT * FROM analysis_jobs WHERE pool_id = ?"
+        params: list[Any] = [pool_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY datetime(created_at) DESC LIMIT ?"
+        params.append(limit)
+
+        with self.store.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._serialize_analysis_job(r) for r in rows]
+
+    def _serialize_analysis_job(self, row) -> dict[str, Any]:
+        """Convert a DB row to a dict."""
+        return {
+            "job_id": row["job_id"],
+            "track_id": row["track_id"],
+            "video_id": row["video_id"],
+            "user_id": row["user_id"],
+            "pool_id": row["pool_id"],
+            "camera_id": row["camera_id"],
+            "status": row["status"],
+            "retry_count": row["retry_count"],
+            "failure_code": row["failure_code"],
+            "failure_reason": row["failure_reason"],
+            "clip_s3": row["clip_s3"],
+            "canonical_s3": row["canonical_s3"],
+            "debug_s3": row["debug_s3"],
+            "ride_duration_seconds": row["ride_duration_seconds"],
+            "dominant_direction": row["dominant_direction"],
+            "ride_score": row["ride_score"],
+            "maneuver_count": row["maneuver_count"],
+            "model_version": row["model_version"],
+            "analysis_duration_ms": row["analysis_duration_ms"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
             "updated_at": row["updated_at"],
         }
 

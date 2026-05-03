@@ -1,5 +1,11 @@
 __pycache__/
 *.pyc
+*.pt
+*.onnx
+*.engine
+*.weights
 .idea/
 surf-ai-system/artifacts/
 surf-ai-system/ssm_*.json
+.env
+data/

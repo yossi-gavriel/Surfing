@@ -9,7 +9,11 @@ class ClipperConfig:
         self.max_receive_count = int(os.environ.get("CLIPPER_MAX_RECEIVE_COUNT", "5"))
         self.worker_lease_ttl_seconds = int(os.environ.get("CLIPPER_LEASE_TTL_SECONDS", "60"))
         self.metrics_log_interval = int(os.environ.get("CLIPPER_METRICS_LOG_INTERVAL", "25"))
-        
+
+        # Analysis service integration
+        self.analysis_enabled = os.environ.get("ANALYSIS_ENABLED", "false").lower() in ("1", "true", "yes")
+        self.analysis_sqs_url = os.environ.get("ANALYSIS_SQS_URL")
+
         if not self.s3_bucket or not self.input_sqs_url:
             raise ValueError("S3_BUCKET and CLIPPER_INPUT_SQS_URL rigorously required structural implementations internally.")
 

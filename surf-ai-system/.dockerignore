@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pt
+**/*.pt
+*.onnx
+**/*.onnx
+*.engine
+**/*.engine
+*.weights
+**/*.weights
+.env
+artifacts/
+data/
+ssm_*.json
+frontend/node_modules/

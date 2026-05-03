@@ -84,6 +84,8 @@ resource "aws_instance" "app_server" {
     q_embed             = aws_sqs_queue.embeddings.url
     q_match             = aws_sqs_queue.matching.url
     q_clip              = aws_sqs_queue.clipper.url
+    q_analysis          = aws_sqs_queue.analysis.url
+    q_analysis_dlq      = aws_sqs_queue.analysis_dlq.url
     domain_name         = var.domain_name
     admin_email         = var.admin_email
     nginx_conf          = local.nginx_conf

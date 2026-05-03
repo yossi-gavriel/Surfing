@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from routes.admin import router as admin_router
+from routes.analysis import router as analysis_router
 from routes.auth import router as auth_router
 from routes.users import router as users_router
 from shared.utils.logger import get_logger
@@ -218,6 +219,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
     app.include_router(admin_router, prefix="/admin", tags=["admin"])
     app.include_router(users_router, tags=["users"])
+    app.include_router(analysis_router, prefix="/analysis", tags=["analysis"])
 
     @app.get("/health")
     def health_check() -> JSONResponse:
